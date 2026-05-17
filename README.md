@@ -543,7 +543,7 @@ Upstox v3 WebSocket sends gzip-compressed Protobuf. At 50 ticks/s sustained and 
 
 MIT — see [`LICENSE`](LICENSE).
 
-Originally developed as an industry project at BITS Pilani (BSc CS, online programme with honours). Source is open for educational, research, and portfolio review purposes. **Not investment advice.**
+Originally developed as an industry project at BITS Pilani (BSc CS, honours). Source is open for educational, research, and portfolio review purposes. **Not investment advice.**
 
 ---
 
