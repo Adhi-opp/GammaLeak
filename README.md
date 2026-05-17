@@ -549,9 +549,8 @@ Originally developed as an industry project at BITS Pilani (BSc CS, online progr
 
 ## Author
 
-**Adhiraj** — BITS Pilani, BSc Computer Science (online, honours).
-Active intraday F&O trader (NIFTY / BANKNIFTY options).
-Targeting Data Engineering / Data Analyst / derivatives-adjacent roles at fintech, product, and GCC engineering centres.
+**Adhiraj** — BITS Pilani, BSc Computer Science (honours).
+Targeting Data Engineering / Data Analyst / derivatives-adjacent roles at fintech, product, Market Data Engineer/Analyst ,Financial Data Analyst and GCC engineering centres.
 
 - Project repo: this directory
 - Email: <adhiraj1904@gmail.com>
