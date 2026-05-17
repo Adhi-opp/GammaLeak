@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GammaLeak — OI Flow Chart Simulation</title>
+<style>
+:root {
+  --bg: #0a0e14;
+  --bg-elev: #11161e;
+  --border: rgba(255,255,255,0.08);
+  --text: #e5e7eb;
+  --dim: #888;
+  --cyan: #22d3ee;
+  --green: #22c55e;
+  --red: #ef4444;
+  --yellow: #facc15;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  padding: 24px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+h1 { font-size: 16px; letter-spacing: 1px; text-transform: uppercase; margin: 0 0 4px 0; color: var(--cyan); }
+.subtitle { color: var(--dim); font-size: 12px; margin-bottom: 18px; line-height: 1.6; }
+.subtitle code { background: var(--bg-elev); padding: 1px 6px; border-radius: 3px; color: var(--cyan); font-size: 11px; }
+
+.scenario-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.scenario-bar button {
+  padding: 9px 16px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--dim);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all 0.12s;
+}
+.scenario-bar button:hover { color: var(--text); border-color: rgba(255,255,255,0.18); }
+.scenario-bar button.active {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  background: rgba(34,211,238,0.08);
+}
+
+.caption {
+  padding: 14px 18px;
+  border-left: 3px solid var(--cyan);
+  background: rgba(34,211,238,0.04);
+  margin-bottom: 14px;
+  line-height: 1.7;
+  font-size: 12.5px;
+}
+.caption strong { color: var(--cyan); }
+
+.panel {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 14px;
+}
+.panel h2 {
+  font-size: 12px;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin: 0 0 12px 0;
+  font-weight: 600;
+}
+
+.footnote {
+  color: var(--dim);
+  font-size: 11px;
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  line-height: 1.6;
+}
+
+/* OI Flow Timeline — copied from index.html so the simulation matches the live chart exactly */
+.oiflow-tl-wrap { width: 100%; }
+.oiflow-tl-svg { width: 100%; display: block; }
+.oiflow-tl-gridline { stroke: rgba(255,255,255,0.05); stroke-width: 1; }
+.oiflow-tl-axis-tick { stroke: rgba(255,255,255,0.10); stroke-width: 1; }
+.oiflow-tl-axis-label { font-size: 9px; fill: var(--dim, #888); }
+.oiflow-tl-axis-title { font-size: 9px; fill: var(--cyan, #22d3ee); text-transform: uppercase; letter-spacing: 1px; font-weight: 700; }
+.oiflow-tl-legend { display: flex; flex-wrap: wrap; gap: 8px 14px; font-size: 10px; color: var(--dim, #888); margin-top: 8px; letter-spacing: 0.3px; }
+.oiflow-tl-legend .item { display: inline-flex; align-items: center; gap: 4px; }
+.oiflow-tl-legend .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.oiflow-tl-empty { color: var(--dim, #888); font-size: 12px; padding: 18px 0; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>GammaLeak — OI Flow Anchored Velocity Chart Simulation</h1>
+<div class="subtitle">
+  Same <code>renderOIFlowTimeline</code> function the live dashboard uses, fed scripted scenarios so each pattern is visible in isolation. No live data — no engine running — pure illustration of what the live chart will look like when the pattern fires.
+</div>
+
+<div class="scenario-bar">
+  <button data-scen="sweep" class="active">1 &middot; Liquidity Sweep (long)</button>
+  <button data-scen="failure">2 &middot; Floor Failure (short)</button>
+  <button data-scen="magnet">3 &middot; Magnet to Max Pain</button>
+</div>
+
+<div class="caption" id="caption"></div>
+
+<div class="panel">
+  <h2>OI Flow — Anchored Velocity Chart (simulated 30 min)</h2>
+  <div class="oiflow-tl-wrap" id="oi-flow-tl-body">
+    <div class="oiflow-tl-empty">Loading scenario&hellip;</div>
+  </div>
+</div>
+
+<div class="footnote">
+  Walls (dashed PE / CE / Max Pain), spot, FUT, and the &Delta; OI velocity lines are all synthesized for this view. In production, walls come from <code>oi_levels_state</code> (refreshed by <code>refresh_oi_levels</code> from live ATM&plusmn;500 OI ticks), FUT comes from the front-month <code>NIFTY_FUT</code> instrument resolved each sample, and &Delta; OI is the 5-min net change classified by <code>classify_oi_flow</code>.
+</div>
+
+<script>
+/* ================================================================
+   Scenario generators
+   ================================================================ */
+const N = 360;                                     // 30 min @ 5s = 360 samples
+const STEP = 5;
+const NOW = Math.floor(Date.now() / 1000);
+const START = NOW - (N - 1) * STEP;
+
+function noise(amp) { return (Math.random() - 0.5) * 2 * amp; }
+function smooth(prev, target, k) { return prev + (target - prev) * k; }
+
+/* ---- Scenario 1: Liquidity Sweep (long) ---------------------- */
+function gen_sweep() {
+  const PE_WALL = 23700, CE_WALL = 23900, MP = 23800;
+  const samples = [];
+  let spot = 23810, fut = 23808;
+  let ceD = 0, peD = 30000;
+  for (let i = 0; i < N; i++) {
+    const t = i * STEP;
+    if (t < 600) {
+      // Quiet consolidation 23,780-23,820
+      spot = smooth(spot, 23800 + noise(20), 0.08);
+      peD = smooth(peD, 30000 + noise(8000), 0.10);
+      ceD = smooth(ceD, 5000 + noise(8000), 0.10);
+    } else if (t < 900) {
+      // Drift down toward the PE wall
+      spot = smooth(spot, 23720 + noise(10), 0.06);
+      peD = smooth(peD, -10000 + noise(6000), 0.10);
+      ceD = smooth(ceD, 40000 + noise(8000), 0.10);
+    } else if (t < 1050) {
+      // The WICK — pierces PE wall briefly, prints 23,650
+      const phase = (t - 900) / 150;
+      spot = 23720 - 70 * Math.sin(phase * Math.PI);
+      peD = smooth(peD, 220000 + noise(10000), 0.25);   // <-- absorption spike
+      ceD = smooth(ceD, -20000 + noise(8000), 0.10);
+    } else if (t < 1350) {
+      // Snap-back above the wall
+      spot = smooth(spot, 23790 + noise(15), 0.07);
+      peD = smooth(peD, 150000 + noise(8000), 0.10);
+      ceD = smooth(ceD, -60000 + noise(8000), 0.10);    // CE unwinding (fear released)
+    } else {
+      // Resolve higher
+      spot = smooth(spot, 23830 + noise(12), 0.07);
+      peD = smooth(peD, 80000 + noise(6000), 0.08);
+      ceD = smooth(ceD, -30000 + noise(6000), 0.08);
+    }
+    fut = smooth(fut, spot - 2 + noise(3), 0.5);
+    samples.push({
+      ts: START + i * STEP,
+      spot: +spot.toFixed(2),
+      fut: +fut.toFixed(2),
+      label: "", ce_pe: "",
+      ce_delta: Math.round(ceD),
+      pe_delta: Math.round(peD),
+      max_pain: MP,
+      top_ce_strike: CE_WALL,
+      top_pe_strike: PE_WALL,
+    });
+  }
+  return samples;
+}
+
+/* ---- Scenario 2: Floor Failure (short) ----------------------- */
+function gen_failure() {
+  const PE_WALL = 23700, CE_WALL = 23850;
+  let MP = 23770;
+  const samples = [];
+  let spot = 23760, fut = 23758;
+  let ceD = 10000, peD = 20000;
+  for (let i = 0; i < N; i++) {
+    const t = i * STEP;
+    if (t < 450) {
+      // First test of PE wall, bounces to 23,740
+      const phase = t / 450;
+      spot = 23750 - 50 * Math.sin(phase * Math.PI);
+      peD = smooth(peD, 25000 + noise(6000), 0.10);
+      ceD = smooth(ceD, 20000 + noise(6000), 0.10);
+      fut = smooth(fut, spot - 2 + noise(3), 0.5);
+    } else if (t < 850) {
+      // Second test — lower high 23,720
+      const phase = (t - 450) / 400;
+      spot = 23720 - 25 * Math.sin(phase * Math.PI);
+      peD = smooth(peD, 5000 + noise(6000), 0.08);
+      ceD = smooth(ceD, 60000 + noise(8000), 0.10);     // CE writers piling on above
+      fut = smooth(fut, spot - 2 + noise(3), 0.5);
+    } else if (t < 1100) {
+      // PE writers START fleeing — floor weakening
+      spot = smooth(spot, 23710 + noise(10), 0.10);
+      peD = smooth(peD, -40000 + noise(6000), 0.15);    // <-- pe_delta turns negative
+      ceD = smooth(ceD, 110000 + noise(8000), 0.10);
+      MP = Math.round(smooth(MP, 23740, 0.05));         // MP follows OI shift
+      fut = smooth(fut, spot - 2 + noise(3), 0.5);
+    } else if (t < 1250) {
+      // BASIS LEAD — FUT slices below 23,700 before spot does
+      spot = smooth(spot, 23705 + noise(6), 0.15);
+      fut = smooth(fut, 23685 + noise(4), 0.25);        // <-- yellow line breaks first
+      peD = smooth(peD, -90000 + noise(8000), 0.20);
+      ceD = smooth(ceD, 160000 + noise(10000), 0.15);
+      MP = Math.round(smooth(MP, 23720, 0.05));
+    } else {
+      // Spot follows, breakdown accelerates to 23,640
+      spot = smooth(spot, 23640 + noise(15), 0.10);
+      peD = smooth(peD, -150000 + noise(10000), 0.10);
+      ceD = smooth(ceD, 220000 + noise(12000), 0.10);
+      MP = Math.round(smooth(MP, 23680, 0.05));
+      fut = smooth(fut, spot - 2 + noise(3), 0.5);
+    }
+    samples.push({
+      ts: START + i * STEP,
+      spot: +spot.toFixed(2),
+      fut: +fut.toFixed(2),
+      label: "", ce_pe: "",
+      ce_delta: Math.round(ceD),
+      pe_delta: Math.round(peD),
+      max_pain: MP,
+      top_ce_strike: CE_WALL,
+      top_pe_strike: PE_WALL,
+    });
+  }
+  return samples;
+}
+
+/* ---- Scenario 3: Magnet to Max Pain -------------------------- */
+function gen_magnet() {
+  const PE_WALL = 23700, CE_WALL = 23950, MP = 23800;
+  const samples = [];
+  let spot = 23880, fut = 23878;
+  let ceD = 15000, peD = 18000;
+  for (let i = 0; i < N; i++) {
+    const t = i * STEP;
+    const phase = t / (N * STEP);
+    // Slow gravitation toward MP; delta amplitude decays
+    spot = smooth(spot, MP + 80 * (1 - phase) + noise(8), 0.05);
+    peD = smooth(peD, 8000 + noise(5000) * (1 - phase * 0.7), 0.08);
+    ceD = smooth(ceD, -5000 + noise(5000) * (1 - phase * 0.7), 0.08);
+    fut = smooth(fut, spot - 1 + noise(3), 0.5);
+    samples.push({
+      ts: START + i * STEP,
+      spot: +spot.toFixed(2),
+      fut: +fut.toFixed(2),
+      label: "", ce_pe: "",
+      ce_delta: Math.round(ceD),
+      pe_delta: Math.round(peD),
+      max_pain: MP,
+      top_ce_strike: CE_WALL,
+      top_pe_strike: PE_WALL,
+    });
+  }
+  return samples;
+}
+
+const SCENARIOS = {
+  sweep: {
+    gen: gen_sweep,
+    caption:
+      '<strong>Liquidity Sweep (long entry).</strong> Spot consolidates above the PE wall (dashed green), drifts down, then briefly wicks <em>below</em> it to ~23,650. Watch the <span style="color:#22c55e;font-weight:700">green pe_delta line</span> spike sharply positive during the wick &mdash; that\'s institutional PE writers absorbing the panic flush. Spot snaps back above the wall, <span style="color:#ef4444;font-weight:700">ce_delta</span> turns negative as CE writers unwind their hedges. <strong>Entry signal:</strong> long on the first 5-min close back above the wall.',
+  },
+  failure: {
+    gen: gen_failure,
+    caption:
+      '<strong>Floor Failure (short entry).</strong> Spot tests the PE wall twice, second touch is a lower high. <span style="color:#22c55e;font-weight:700">pe_delta</span> trends DOWN (writers giving up the floor &mdash; capitulation), <span style="color:#ef4444;font-weight:700">ce_delta</span> rips UP (CE writers piling on above price). The <span style="color:#facc15;font-weight:700">yellow FUT line</span> then slices below 23,700 BEFORE cyan spot does &mdash; classic basis lead. <strong>Entry signal:</strong> short when spot confirms below the wall after FUT has already broken.',
+  },
+  magnet: {
+    gen: gen_magnet,
+    caption:
+      '<strong>Magnet to Max Pain (neutral / theta).</strong> Spot drifts toward the dashed gray Max Pain line. Both delta lines decay toward zero &mdash; no conviction either way, writers are content to let price gravitate where they earn most. <strong>Entry signal:</strong> no directional bet warranted &mdash; this is a sell-premium / iron-condor environment.',
+  },
+};
+
+/* ================================================================
+   Chart renderer — copied verbatim from index.html
+   ================================================================ */
+function renderOIFlowTimeline(data) {
+  const el = document.getElementById('oi-flow-tl-body');
+  if (!el) return;
+  const tl = data.oi_flow_timeline;
+  if (!tl || !tl.samples || tl.samples.length < 2) {
+    el.innerHTML = '<div class="oiflow-tl-empty">Building history&hellip;</div>';
+    return;
+  }
+  const samples = tl.samples;
+  const tsNow = tl.ts_now;
+  const windowSecs = tl.window_secs || 1800;
+  const tsMin = tsNow - windowSecs;
+  const tsMax = tsNow;
+
+  const latest = samples[samples.length - 1];
+  const anchorPE = latest.top_pe_strike || 0;
+  const anchorCE = latest.top_ce_strike || 0;
+  const anchorMP = latest.max_pain || 0;
+
+  const W = el.clientWidth || 1200;
+  const H = 280;
+  const M = { top: 14, right: 92, bottom: 26, left: 64 };
+  const innerW = W - M.left - M.right;
+  const innerH = H - M.top - M.bottom;
+  const innerLeft = M.left;
+  const innerRight = M.left + innerW;
+  const innerTop = M.top;
+  const innerBottom = M.top + innerH;
+
+  const spotVals = samples.map(s => s.spot);
+  const futVals = samples.map(s => s.fut || 0).filter(v => v > 0);
+  const anchorVals = [anchorPE, anchorCE, anchorMP].filter(v => v > 0);
+  const allPrimary = spotVals.concat(futVals).concat(anchorVals);
+  const pMin = Math.min(...allPrimary);
+  const pMax = Math.max(...allPrimary);
+  const pPad = Math.max(2, (pMax - pMin) * 0.10);
+  const pLo = pMin - pPad;
+  const pHi = pMax + pPad;
+  const yP = (v) => innerBottom - ((v - pLo) / (pHi - pLo)) * innerH;
+
+  const ceDs = samples.map(s => s.ce_delta);
+  const peDs = samples.map(s => s.pe_delta);
+  const allDeltas = ceDs.concat(peDs);
+  const dAbsMax = Math.max(1, ...allDeltas.map(d => Math.abs(d)));
+  const dLo = -dAbsMax * 1.1;
+  const dHi =  dAbsMax * 1.1;
+  const yD = (v) => innerBottom - ((v - dLo) / (dHi - dLo)) * innerH;
+
+  const xOf = (ts) => innerLeft + Math.max(0, Math.min(innerW, ((ts - tsMin) / windowSecs) * innerW));
+
+  let svg = `<svg class="oiflow-tl-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" height="${H}">`;
+
+  for (let i = 0; i <= 4; i++) {
+    const y = innerTop + (innerH * i / 4);
+    const pv = pHi - (pHi - pLo) * (i / 4);
+    const dv = dHi - (dHi - dLo) * (i / 4);
+    svg += `<line class="oiflow-tl-gridline" x1="${innerLeft}" y1="${y.toFixed(1)}" x2="${innerRight}" y2="${y.toFixed(1)}" />`;
+    svg += `<text class="oiflow-tl-axis-label" x="${innerLeft - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end">${pv.toFixed(0)}</text>`;
+    const dStr = dv >= 0 ? '+' + Math.round(dv).toLocaleString('en-IN') : Math.round(dv).toLocaleString('en-IN');
+    svg += `<text class="oiflow-tl-axis-label" x="${innerRight + 6}" y="${(y + 3).toFixed(1)}" text-anchor="start" style="fill:#888">${dStr}</text>`;
+  }
+
+  const firstTick = Math.ceil(tsMin / 300) * 300;
+  for (let t = firstTick; t <= tsMax; t += 300) {
+    const x = xOf(t);
+    const dt = new Date(t * 1000);
+    const lbl = String(dt.getHours()).padStart(2, '0') + ':' + String(dt.getMinutes()).padStart(2, '0');
+    svg += `<line class="oiflow-tl-axis-tick" x1="${x.toFixed(1)}" y1="${innerBottom}" x2="${x.toFixed(1)}" y2="${innerBottom + 4}" />`;
+    svg += `<text class="oiflow-tl-axis-label" x="${x.toFixed(1)}" y="${innerBottom + 16}" text-anchor="middle">${lbl}</text>`;
+  }
+
+  svg += `<text class="oiflow-tl-axis-title" x="${innerLeft - 6}" y="${(innerTop - 4).toFixed(1)}" text-anchor="end">PRICE</text>`;
+  svg += `<text class="oiflow-tl-axis-title" x="${innerRight + 6}" y="${(innerTop - 4).toFixed(1)}" text-anchor="start" style="fill:#888">&Delta; OI</text>`;
+
+  const drawAnchor = (strike, color, label) => {
+    if (!strike || strike < pLo || strike > pHi) return '';
+    const y = yP(strike).toFixed(1);
+    return `
+      <line x1="${innerLeft}" y1="${y}" x2="${innerRight}" y2="${y}" stroke="${color}" stroke-width="1" stroke-dasharray="6 4" opacity="0.55" />
+      <text x="${innerRight - 4}" y="${(parseFloat(y) - 4).toFixed(1)}" text-anchor="end" style="font-size:9px;fill:${color};opacity:0.85;letter-spacing:0.4px">${label} ${strike.toLocaleString('en-IN')}</text>
+    `;
+  };
+  svg += drawAnchor(anchorPE, '#22c55e', 'PE WALL');
+  svg += drawAnchor(anchorCE, '#ef4444', 'CE WALL');
+  svg += drawAnchor(anchorMP, '#9ca3af', 'MAX PAIN');
+
+  const yZero = yD(0);
+  svg += `<line x1="${innerLeft}" y1="${yZero.toFixed(1)}" x2="${innerRight}" y2="${yZero.toFixed(1)}" stroke="#ffffff" stroke-width="0.5" opacity="0.25" />`;
+
+  let spotPath = '';
+  samples.forEach((s, idx) => {
+    spotPath += (idx === 0 ? 'M' : 'L') + xOf(s.ts).toFixed(1) + ',' + yP(s.spot).toFixed(1) + ' ';
+  });
+  svg += `<path d="${spotPath.trim()}" fill="none" stroke="#22d3ee" stroke-width="1.6" />`;
+
+  let futPath = '';
+  let futPenDown = false;
+  samples.forEach((s) => {
+    if (s.fut && s.fut > 0) {
+      futPath += (futPenDown ? 'L' : 'M') + xOf(s.ts).toFixed(1) + ',' + yP(s.fut).toFixed(1) + ' ';
+      futPenDown = true;
+    } else {
+      futPenDown = false;
+    }
+  });
+  if (futPath) {
+    svg += `<path d="${futPath.trim()}" fill="none" stroke="#facc15" stroke-width="1.2" stroke-dasharray="3 3" opacity="0.85" />`;
+  }
+
+  const buildDeltaPath = (key) => {
+    let p = '';
+    samples.forEach((s, idx) => {
+      p += (idx === 0 ? 'M' : 'L') + xOf(s.ts).toFixed(1) + ',' + yD(s[key]).toFixed(1) + ' ';
+    });
+    return p.trim();
+  };
+  svg += `<path d="${buildDeltaPath('ce_delta')}" fill="none" stroke="#ef4444" stroke-width="1.2" opacity="0.95" />`;
+  svg += `<path d="${buildDeltaPath('pe_delta')}" fill="none" stroke="#22c55e" stroke-width="1.2" opacity="0.95" />`;
+
+  const nowX = xOf(tsNow);
+  svg += `<line x1="${nowX.toFixed(1)}" y1="${innerTop}" x2="${nowX.toFixed(1)}" y2="${innerBottom}" stroke="#22d3ee" stroke-width="0.7" stroke-dasharray="2 3" opacity="0.45" />`;
+
+  const labelAt = (y, color, txt) => `<text x="${(innerRight + 30).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="start" style="font-size:10px;font-weight:700;fill:${color};dominant-baseline:middle">${txt}</text>`;
+  svg += labelAt(yP(latest.spot),        '#22d3ee', latest.spot.toFixed(0));
+  if (latest.fut && latest.fut > 0) {
+    svg += labelAt(yP(latest.fut),       '#facc15', latest.fut.toFixed(0));
+  }
+  svg += labelAt(yD(latest.ce_delta),    '#ef4444', (latest.ce_delta >= 0 ? '+' : '') + latest.ce_delta.toLocaleString('en-IN'));
+  svg += labelAt(yD(latest.pe_delta),    '#22c55e', (latest.pe_delta >= 0 ? '+' : '') + latest.pe_delta.toLocaleString('en-IN'));
+
+  svg += '</svg>';
+
+  const legend = `<div class="oiflow-tl-legend">
+    <span class="item"><span class="swatch" style="background:#22d3ee"></span>Spot</span>
+    <span class="item"><span class="swatch" style="background:#facc15;border:1px dashed #facc15"></span>NIFTY FUT (basis lead)</span>
+    <span class="item"><span class="swatch" style="background:#22c55e;opacity:0.55;border:1px dashed #22c55e"></span>PE Wall (Floor)</span>
+    <span class="item"><span class="swatch" style="background:#ef4444;opacity:0.55;border:1px dashed #ef4444"></span>CE Wall (Ceiling)</span>
+    <span class="item"><span class="swatch" style="background:#9ca3af;opacity:0.55;border:1px dashed #9ca3af"></span>Max Pain (Magnet)</span>
+    <span style="margin-left:14px"></span>
+    <span class="item"><span class="swatch" style="background:#ef4444"></span>&Delta; CE OI (writers/unwind)</span>
+    <span class="item"><span class="swatch" style="background:#22c55e"></span>&Delta; PE OI (writers/unwind)</span>
+  </div>`;
+
+  el.innerHTML = svg + legend;
+}
+
+/* ================================================================
+   Boot
+   ================================================================ */
+function load(scen) {
+  document.querySelectorAll('.scenario-bar button').forEach(b => {
+    b.classList.toggle('active', b.dataset.scen === scen);
+  });
+  document.getElementById('caption').innerHTML = SCENARIOS[scen].caption;
+  const samples = SCENARIOS[scen].gen();
+  const payload = {
+    oi_flow_timeline: {
+      samples: samples,
+      ts_now: NOW,
+      window_secs: 1800,
+    }
+  };
+  renderOIFlowTimeline(payload);
+}
+
+document.querySelectorAll('.scenario-bar button').forEach(b => {
+  b.addEventListener('click', () => load(b.dataset.scen));
+});
+
+// Re-render on resize so chart geometry adapts.
+let _resizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(_resizeTimer);
+  _resizeTimer = setTimeout(() => {
+    const active = document.querySelector('.scenario-bar button.active');
+    if (active) load(active.dataset.scen);
+  }, 120);
+});
+
+load('sweep');
+</script>
+</body>
+</html>

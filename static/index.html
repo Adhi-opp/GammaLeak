@@ -1,0 +1,1758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GammaLeak — Live Market Microstructure HUD</title>
+<style>
+/* ================================================================
+   THEME & RESET
+   ================================================================ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  /* Pure-black theme — cards sit on a true black canvas, panels lift to near-black */
+  --bg:        #000000;
+  --bg-card:   #0a0a0a;
+  --bg-panel:  #111111;
+  --border:    #1f1f1f;
+  --border-hl: #2d2d2d;
+  --text:      #e5e7eb;
+  --text-dim:  #8a8f99;
+  --text-muted:#55595f;
+  --green:     #22c55e;
+  --green-dim: #14331f;
+  --red:       #f43f5e;
+  --red-dim:   #3a0f18;
+  --yellow:    #eab308;
+  --cyan:      #22d3ee;
+  --magenta:   #c084fc;
+  --orange:    #fb923c;
+  --blue:      #60a5fa;
+  --white:     #ffffff;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'SF Mono', 'JetBrains Mono', Consolas, 'Cascadia Code', monospace;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  min-height: 100vh;
+  overflow-x: hidden;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+/* Numbers still get mono alignment via this helper class */
+.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* ================================================================
+   CONNECTION STATUS BAR
+   ================================================================ */
+#conn-bar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  height: 3px; background: var(--green); transition: background 0.3s;
+}
+#conn-bar.disconnected { background: var(--red); animation: pulse 1s infinite; }
+@keyframes pulse { 50% { opacity: 0.4; } }
+
+/* ================================================================
+   LAYOUT
+   ================================================================ */
+.app {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 12px 16px 24px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+.header h1 {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--cyan);
+  letter-spacing: 0.5px;
+}
+.header .session {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+}
+
+/* ================================================================
+   PANELS
+   ================================================================ */
+.panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+.panel-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--text-dim);
+  padding: 8px 14px 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.panel-body { padding: 10px 14px; }
+
+/* ================================================================
+   MACRO BAR — horizontal chips
+   ================================================================ */
+.macro-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.macro-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+}
+.macro-chip .label { color: var(--text-dim); font-size: 11px; }
+.macro-chip .value { font-weight: 600; color: var(--white); }
+.macro-chip .change { font-size: 11px; }
+
+/* ================================================================
+   FOCUS PANEL
+   ================================================================ */
+.focus-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.focus-row:last-child { border-bottom: none; }
+.focus-rank {
+  width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  font-size: 11px; font-weight: 700;
+  background: var(--border-hl);
+  color: var(--cyan);
+}
+.focus-name { font-weight: 600; color: var(--white); min-width: 90px; }
+.focus-badge {
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* ================================================================
+   MAIN INSTRUMENT TABLE
+   ================================================================ */
+.inst-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px;
+}
+.inst-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  transition: border-color 0.2s, transform 0.12s;
+}
+.inst-card:hover { transform: translateY(-1px); }
+.inst-card:hover { border-color: var(--border-hl); }
+.inst-card.signal-active { border-left: 3px solid var(--yellow); }
+.inst-card.signal-confirmed { border-left: 3px solid var(--green); }
+.inst-card.signal-momentum { border-left: 3px solid var(--magenta); }
+
+.inst-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+.inst-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--white);
+}
+.inst-ltp {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.inst-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px;
+}
+.inst-metric {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+.inst-metric .k { color: var(--text-dim); }
+.inst-metric .v { font-weight: 500; }
+
+.inst-signal {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* Plain-English verdict row — sits between metrics and action signal */
+.verdict-row {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-left: 3px solid var(--border);
+}
+.verdict-row .verdict-label {
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: 0.4px;
+}
+.verdict-row .verdict-why {
+  font-size: 11px;
+  opacity: 0.75;
+}
+.verdict-high {
+  background: rgba(255, 60, 60, 0.10);
+  border-left-color: var(--red);
+  color: #fff5f5;
+}
+.verdict-med {
+  background: rgba(255, 200, 50, 0.08);
+  border-left-color: var(--yellow);
+  color: #fff8e0;
+}
+.verdict-low {
+  background: rgba(255,255,255,0.03);
+  border-left-color: #444;
+  color: #cfcfcf;
+}
+
+/* When the english verdict has real conviction, demote the old action_signal
+   badge + setup-tag so they stop competing with (or contradicting) the
+   plain-English call. They stay visible for reference, just no longer loud. */
+.verdict-priority-high .verdict-row .verdict-label,
+.verdict-priority-med  .verdict-row .verdict-label {
+  font-size: 15px;
+  letter-spacing: 0.5px;
+}
+.verdict-priority-high .verdict-row {
+  padding: 10px 12px;
+  border-left-width: 4px;
+}
+.verdict-priority-high .signal-badge,
+.verdict-priority-med  .signal-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  opacity: 0.45;
+  background: transparent !important;
+  border: 1px solid var(--border);
+  color: #888 !important;
+  text-transform: none;
+  font-weight: 500;
+}
+.verdict-priority-high .signal-badge::before,
+.verdict-priority-med  .signal-badge::before {
+  content: "engine: ";
+  opacity: 0.6;
+  font-style: italic;
+}
+.verdict-priority-high .setup-tag,
+.verdict-priority-med  .setup-tag,
+.verdict-priority-high .conviction,
+.verdict-priority-med  .conviction {
+  opacity: 0.45;
+  font-size: 9px;
+}
+.verdict-priority-high .inst-signal,
+.verdict-priority-med  .inst-signal {
+  border-top: none;
+  padding-top: 4px;
+  margin-top: 6px;
+}
+
+/* Pre-Open panel rows */
+#pre-open-panel { display: flex; flex-direction: column; gap: 4px; }
+.po-row {
+  display: grid;
+  grid-template-columns: 90px 110px 16px 80px 80px 1fr;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  border-left: 3px solid var(--border);
+}
+.po-name { font-weight: 700; }
+.po-prior { color: #aaa; }
+.po-arrow { color: #777; }
+.po-now { font-weight: 600; }
+.po-gap { font-weight: 700; }
+.po-bucket { font-size: 10px; opacity: 0.7; letter-spacing: 0.5px; }
+.gap-large-up   { background: rgba(80, 200, 120, 0.12); border-left-color: var(--green); }
+.gap-small-up   { background: rgba(80, 200, 120, 0.06); border-left-color: #2d6b3f; }
+.gap-large-dn   { background: rgba(220, 70, 80, 0.12);  border-left-color: var(--red); }
+.gap-small-dn   { background: rgba(220, 70, 80, 0.06);  border-left-color: #6b2330; }
+.gap-flat       { background: rgba(255,255,255,0.02);   border-left-color: #444; }
+.signal-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+/* Z-score bar */
+.z-bar-container {
+  width: 100%;
+  height: 6px;
+  background: var(--bg-card);
+  border-radius: 3px;
+  margin-top: 6px;
+  position: relative;
+  overflow: visible;
+}
+.z-bar-center {
+  position: absolute;
+  left: 50%;
+  top: -1px;
+  width: 1px;
+  height: 8px;
+  background: var(--text-muted);
+}
+.z-bar-fill {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-radius: 3px;
+  transition: left 0.15s, width 0.15s;
+}
+
+/* ================================================================
+   SETUP LABEL + CONVICTION STARS
+   ================================================================ */
+.setup-tag {
+  display: inline-block;
+  padding: 1px 7px;
+  margin-right: 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  background: #1a0f2e;
+  color: var(--magenta);
+  border: 1px solid #2a1a4a;
+}
+.conviction {
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--yellow);
+}
+.conviction-dim { color: var(--text-muted); }
+.blackout-tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  background: #2a1e00;
+  color: var(--yellow);
+  border: 1px solid #3a2800;
+  margin-left: 6px;
+}
+
+/* ================================================================
+   V5.2 MICRO-STRUCTURAL LAYER (amber pre-alert + tick-rate spike + micro-Z)
+   ================================================================ */
+.inst-card.amber-warn { border-left: 3px solid var(--yellow); }
+.inst-card.amber-long { border-left: 3px solid var(--green); background: linear-gradient(90deg, rgba(34,197,94,0.04) 0%, var(--bg-card) 20%); }
+.inst-card.amber-short { border-left: 3px solid var(--red); background: linear-gradient(90deg, rgba(244,63,94,0.04) 0%, var(--bg-card) 20%); }
+.amber-tag {
+  display: inline-block;
+  padding: 1px 7px;
+  margin-right: 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  background: #2a1e00;
+  color: var(--yellow);
+  border: 1px solid #3a2800;
+}
+.amber-tag.long  { color: var(--green); background: var(--green-dim); border-color: #1e4a2f; }
+.amber-tag.short { color: var(--red);   background: var(--red-dim);   border-color: #4a1f28; }
+.spike-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  margin-right: 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  background: #0f2030;
+  color: var(--cyan);
+  border: 1px solid #1a3040;
+}
+.microz-mild    { color: var(--yellow);  font-weight: 600; }
+.microz-long    { color: var(--green);   font-weight: 700; }
+.microz-short   { color: var(--red);     font-weight: 700; }
+
+/* ================================================================
+   INDEX DRIVERS PANEL (Phase 2)
+   ================================================================ */
+.drivers-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 8px;
+}
+.driver-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 9px 12px;
+}
+.driver-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 4px;
+}
+.driver-pair { font-weight: 700; color: var(--white); font-size: 12px; }
+.driver-corr { font-size: 13px; font-weight: 700; font-family: var(--font-mono); }
+.driver-corr.strong  { color: var(--green); }
+.driver-corr.medium  { color: var(--yellow); }
+.driver-corr.weak    { color: var(--red); }
+.driver-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.driver-flag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  margin-left: 6px;
+}
+.driver-flag.drag    { background: #3a0f18; color: var(--red); }
+.driver-flag.diverge { background: #2a1e00; color: var(--yellow); }
+.driver-flag.boost   { background: #14331f; color: var(--green); }
+.driver-detail {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+/* ================================================================
+   OI LEVELS PANEL (Phase 3: Max-Pain + Gamma Walls)
+   ================================================================ */
+.oilvl-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 10px 12px;
+}
+.oilvl-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.oilvl-symbol { font-weight: 700; color: var(--white); font-size: 14px; }
+.oilvl-spot { color: var(--cyan, #22d3ee); font-family: var(--font-mono); font-size: 13px; }
+.oilvl-maxpain {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--yellow);
+}
+.oilvl-maxpain-dist { font-size: 11px; color: var(--text-dim); margin-left: 4px; }
+.oilvl-meta { font-size: 11px; color: var(--text-dim); }
+.oilvl-walls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.oilvl-side { }
+.oilvl-side-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.oilvl-side-title.ce { color: var(--red); }
+.oilvl-side-title.pe { color: var(--green); }
+.oilvl-wall-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  padding: 2px 0;
+}
+.oilvl-wall-row .strike { color: var(--white); }
+.oilvl-wall-row.ce .strike { color: var(--red); }
+.oilvl-wall-row.pe .strike { color: var(--green); }
+.oilvl-wall-row .dist { color: var(--text-dim); font-size: 11px; margin-left: 4px; }
+.oilvl-wall-row .oi { color: var(--text-dim); }
+.oilvl-stale { color: var(--yellow); font-style: italic; font-size: 12px; }
+
+/* ================================================================
+   OI FLOW PANEL
+   ================================================================ */
+.oi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+.oi-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 10px 12px;
+  text-align: center;
+}
+.oi-card .oi-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.oi-card .oi-value {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+/* ================================================================
+   FOOTER PANELS (V4 Engine + PCR)
+   ================================================================ */
+.footer-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+@media (max-width: 900px) { .footer-grid { grid-template-columns: 1fr; } }
+
+.kv-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 0;
+  font-size: 12px;
+  border-bottom: 1px solid #0e1320;
+}
+.kv-row:last-child { border-bottom: none; }
+.kv-row .k { color: var(--text-dim); }
+
+/* ================================================================
+   FII/DII BAR
+   ================================================================ */
+.fii-bar {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  font-size: 12px;
+}
+.fii-tag {
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: 11px;
+}
+
+/* ================================================================
+   UTILITY CLASSES
+   ================================================================ */
+.up { color: var(--green); }
+.down { color: var(--red); }
+.neutral { color: var(--text-dim); }
+.warn { color: var(--yellow); }
+.accent { color: var(--cyan); }
+.mag { color: var(--magenta); }
+.ora { color: var(--orange); }
+
+.bg-up { background: var(--green-dim); color: var(--green); }
+.bg-down { background: var(--red-dim); color: var(--red); }
+.bg-warn { background: #422006; color: var(--yellow); }
+.bg-accent { background: #083344; color: var(--cyan); }
+.bg-mag { background: #2e1065; color: var(--magenta); }
+.bg-neutral { background: var(--bg-panel); color: var(--text-dim); }
+
+.text-xs { font-size: 11px; }
+.text-sm { font-size: 12px; }
+.fw-600 { font-weight: 600; }
+.fw-700 { font-weight: 700; }
+.gap-6 { gap: 6px; }
+.mt-4 { margin-top: 4px; }
+.dim { opacity: 0.5; }
+
+/* ================================================================
+   TABS
+   ================================================================ */
+.tab-nav {
+  display: flex;
+  gap: 4px;
+  margin: 6px 0 12px 0;
+  border-bottom: 1px solid var(--border, #2a2a2a);
+}
+.tab-btn {
+  background: transparent;
+  color: var(--dim, #888);
+  border: none;
+  padding: 8px 18px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  font-family: inherit;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.12s, border-color 0.12s;
+}
+.tab-btn:hover { color: var(--fg, #ddd); }
+.tab-btn.active {
+  color: var(--cyan, #4ec9ff);
+  border-bottom-color: var(--cyan, #4ec9ff);
+}
+
+/* ================================================================
+   GLOBAL INDICES PANEL
+   ================================================================ */
+.gi-region {
+  margin-bottom: 14px;
+}
+.gi-region:last-child { margin-bottom: 0; }
+.gi-region-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--dim, #888);
+  border-bottom: 1px dashed var(--border, #2a2a2a);
+  padding-bottom: 4px;
+  margin-bottom: 6px;
+}
+.gi-row {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 0.9fr;
+  align-items: center;
+  padding: 4px 0;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
+.gi-row + .gi-row { border-top: 1px dotted rgba(255,255,255,0.04); }
+.gi-name { font-weight: 600; }
+.gi-ltp { text-align: right; }
+.gi-chg { text-align: right; font-weight: 600; padding-left: 12px; }
+.gi-chg.up { color: var(--green, #22c55e); }
+.gi-chg.down { color: var(--red, #ef4444); }
+.gi-meta {
+  font-size: 10px;
+  color: var(--dim, #888);
+  margin-top: 8px;
+  letter-spacing: 0.4px;
+}
+
+/* ================================================================
+   FULL-CHAIN OI SUB-CARD (overlays existing OI Levels panel)
+   ================================================================ */
+.oichain-card {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-left: 3px solid var(--yellow, #f5c542);
+  border-radius: 4px;
+  background: rgba(255,255,255,0.015);
+}
+.oichain-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.oichain-title {
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--yellow, #f5c542);
+  font-weight: 700;
+  font-size: 10px;
+}
+.oichain-headstat {
+  font-variant-numeric: tabular-nums;
+}
+.oichain-headstat .lbl { color: var(--dim, #888); font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; margin-right: 4px; }
+.oichain-headstat .val { font-weight: 700; }
+.oichain-headstat + .oichain-headstat { margin-left: 18px; }
+.oichain-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 4px;
+}
+.oichain-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--dim, #888);
+  text-transform: uppercase;
+  border-bottom: 1px dashed rgba(255,255,255,0.08);
+  padding-bottom: 3px;
+  margin-bottom: 6px;
+}
+.oichain-row {
+  display: grid;
+  grid-template-columns: 0.7fr 0.8fr 1fr 1fr;
+  column-gap: 18px;
+  align-items: center;
+  font-size: 12px;
+  padding: 4px 0;
+  font-variant-numeric: tabular-nums;
+}
+.oichain-row.is-atm { background: rgba(245,197,66,0.08); font-weight: 700; padding-left: 4px; padding-right: 4px; }
+.oichain-row .strike { color: var(--fg, #ddd); }
+.oichain-row .ce { color: #ff7878; text-align: right; padding-left: 14px; }
+.oichain-row .pe { color: #6ee388; text-align: right; padding-left: 14px; }
+.oichain-row .dist { color: var(--dim, #888); font-size: 11px; text-align: right; padding-right: 14px; }
+.oichain-row .dist::after { content: "·"; margin-left: 8px; color: rgba(255,255,255,0.18); }
+.oichain-meta { font-size: 10px; color: var(--dim, #888); margin-top: 6px; letter-spacing: 0.4px; }
+
+/* ================================================================
+   OI FLOW TIMELINE (strip chart, handwritten SVG)
+   ================================================================ */
+.oiflow-tl-wrap { width: 100%; }
+.oiflow-tl-svg { width: 100%; display: block; }
+.oiflow-tl-spotline { fill: none; stroke: var(--cyan, #22d3ee); stroke-width: 1.5; }
+.oiflow-tl-gridline { stroke: rgba(255,255,255,0.05); stroke-width: 1; }
+.oiflow-tl-axis-tick { stroke: rgba(255,255,255,0.10); stroke-width: 1; }
+.oiflow-tl-axis-label { font-size: 9px; fill: var(--dim, #888); }
+.oiflow-tl-band-label { font-size: 9px; fill: var(--dim, #888); text-transform: uppercase; letter-spacing: 0.6px; }
+.oiflow-tl-bandtitle { font-size: 10px; fill: var(--dim, #888); letter-spacing: 0.4px; font-weight: 600; }
+.oiflow-tl-axis-title { font-size: 9px; fill: var(--cyan, #22d3ee); text-transform: uppercase; letter-spacing: 1px; font-weight: 700; }
+.oiflow-tl-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  font-size: 10px;
+  color: var(--dim, #888);
+  margin-top: 8px;
+  letter-spacing: 0.3px;
+}
+.oiflow-tl-legend .item { display: inline-flex; align-items: center; gap: 4px; }
+.oiflow-tl-legend .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.oiflow-tl-empty { color: var(--dim, #888); font-size: 12px; padding: 18px 0; text-align: center; }
+</style>
+</head>
+<body>
+
+<div id="conn-bar" class="disconnected"></div>
+
+<div class="app">
+  <!-- HEADER -->
+  <div class="header">
+    <h1>GAMMALEAK &mdash; Adaptive VWAP Z-Score Monitor</h1>
+    <div>
+      <span class="session" id="session-badge">CONNECTING...</span>
+      <span class="text-xs dim" id="latency-text" style="margin-left:8px;"></span>
+    </div>
+  </div>
+
+  <!-- TAB NAVIGATION -->
+  <div class="tab-nav">
+    <button class="tab-btn active" data-tab="main">Main</button>
+    <button class="tab-btn" data-tab="global">Global Indices</button>
+  </div>
+
+  <!-- ================== MAIN TAB ================== -->
+  <div id="tab-main" class="tab-content">
+
+  <!-- MACRO BAR -->
+  <div class="panel">
+    <div class="panel-title" style="border-color:var(--cyan);">Macro</div>
+    <div class="panel-body">
+      <div class="macro-grid" id="macro-bar"></div>
+      <div id="fii-bar" class="fii-bar" style="margin-top:8px;display:none;"></div>
+      <div id="sonar-bar" style="margin-top:6px;font-size:12px;display:none;"></div>
+    </div>
+  </div>
+
+  <!-- PRE-OPEN CONTEXT (gap vs prior close, indices + futures) -->
+  <div class="panel">
+    <div class="panel-title" style="border-color:var(--magenta);">Pre-Open Context</div>
+    <div class="panel-body" id="pre-open-panel">
+      <div class="dim text-xs">Waiting for prior-close seed and first tick…</div>
+    </div>
+  </div>
+
+  <!-- FOCUS PANEL -->
+  <div class="panel">
+    <div class="panel-title" style="border-color:var(--magenta);">Focus</div>
+    <div class="panel-body" id="focus-panel">
+      <div class="dim">No active focus names.</div>
+    </div>
+  </div>
+
+  <!-- INSTRUMENT CARDS -->
+  <div class="inst-grid" id="inst-grid"></div>
+
+  <!-- INDEX DRIVERS (Phase 2) -->
+  <div class="panel" style="margin-top:10px;">
+    <div class="panel-title" style="border-color:var(--magenta);">Index Drivers &mdash; Correlation / Lead-Lag / Drag</div>
+    <div class="panel-body">
+      <div class="drivers-grid" id="drivers-grid">
+        <div class="dim">Warming up...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- OI LEVELS (Phase 3): Max-Pain + Gamma Walls -->
+  <div class="panel" style="margin-top:10px;">
+    <div class="panel-title" style="border-color:var(--yellow);">OI Levels &mdash; Max-Pain &amp; Gamma Walls</div>
+    <div class="panel-body">
+      <div id="oi-levels-body">
+        <div class="dim">Warming up...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- OI FLOW PANEL -->
+  <div class="panel" style="margin-top:10px;">
+    <div class="panel-title" style="border-color:var(--orange);">OI Flow &mdash; ATM Window</div>
+    <div class="panel-body">
+      <div class="oi-grid" id="oi-flow-grid"></div>
+    </div>
+  </div>
+
+  <!-- OI FLOW ANCHORED CHART (dual-axis: price + anchors // ce/pe delta velocity) -->
+  <div class="panel" style="margin-top:10px;">
+    <div class="panel-title" style="border-color:var(--magenta);">OI Flow &mdash; Anchored Velocity Chart (last 30 min)</div>
+    <div class="panel-body">
+      <div class="oiflow-tl-wrap" id="oi-flow-tl-body">
+        <div class="oiflow-tl-empty">Building history…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FOOTER: V4 Engine + PCR -->
+  <div class="footer-grid" style="margin-top:10px;">
+    <div class="panel">
+      <div class="panel-title" style="border-color:var(--yellow);">V4 Adaptive Engine</div>
+      <div class="panel-body" id="v4-panel"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-title" style="border-color:var(--green);">Options X-Ray</div>
+      <div class="panel-body" id="pcr-panel"></div>
+    </div>
+  </div>
+
+  </div><!-- end #tab-main -->
+
+  <!-- ================== GLOBAL INDICES TAB ================== -->
+  <div id="tab-global" class="tab-content" style="display:none;">
+    <div class="panel">
+      <div class="panel-title" style="border-color:var(--cyan);">Global Indices</div>
+      <div class="panel-body" id="global-indices-body">
+        <div class="dim">Waiting for first refresh…</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+/* ================================================================
+   WEBSOCKET + RENDERING ENGINE
+   ================================================================ */
+const WS_URL = `ws://${location.host}/ws`;
+let ws = null;
+let lastTs = 0;
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => {
+    document.getElementById('conn-bar').classList.remove('disconnected');
+    // Send keep-alive pings
+    setInterval(() => { if (ws && ws.readyState === 1) ws.send('ping'); }, 10000);
+  };
+  ws.onclose = () => {
+    document.getElementById('conn-bar').classList.add('disconnected');
+    document.getElementById('session-badge').textContent = 'DISCONNECTED';
+    setTimeout(connect, 2000);
+  };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (evt) => {
+    const data = JSON.parse(evt.data);
+    const now = performance.now();
+    if (lastTs > 0) {
+      document.getElementById('latency-text').textContent = `${Math.round(now - lastTs)}ms`;
+    }
+    lastTs = now;
+    render(data);
+  };
+}
+
+/* ================================================================
+   RENDER FUNCTIONS
+   ================================================================ */
+
+function colorVal(val, invert) {
+  if (val > 0) return invert ? 'down' : 'up';
+  if (val < 0) return invert ? 'up' : 'down';
+  return 'neutral';
+}
+
+function fmtNum(n, dec) {
+  if (n == null) return '-';
+  return n.toLocaleString('en-IN', { minimumFractionDigits: dec, maximumFractionDigits: dec });
+}
+
+function fmtPct(n) {
+  if (n == null) return '-';
+  return (n > 0 ? '+' : '') + n.toFixed(2) + '%';
+}
+
+function signalClass(signal) {
+  if (!signal) return 'bg-neutral';
+  const s = signal.toUpperCase();
+  if (s.includes('MOMENTUM')) return 'bg-mag';
+  if (s.includes('FADE') || s.includes('EXHAUSTION')) return 'bg-up';
+  if (s.includes('STRETCH')) return 'bg-warn';
+  if (s.includes('STAND DOWN')) return 'bg-down';
+  if (s.includes('NO EDGE') || s.includes('WARMING')) return 'bg-neutral';
+  return 'bg-accent';
+}
+
+function cardBorderClass(sig, sigState) {
+  if (sigState === 2) return 'signal-confirmed';
+  if (sigState === 1) return 'signal-active';
+  const s = (sig || '').toUpperCase();
+  if (s.includes('MOMENTUM')) return 'signal-momentum';
+  return '';
+}
+
+function zBarHTML(z) {
+  const clamped = Math.max(-5, Math.min(5, z));
+  const pct = ((clamped + 5) / 10) * 100;
+  const width = Math.abs(clamped) / 5 * 50;
+  const left = z >= 0 ? 50 : 50 - width;
+  const color = z >= 0 ? 'var(--green)' : 'var(--red)';
+  return `<div class="z-bar-container">
+    <div class="z-bar-center"></div>
+    <div class="z-bar-fill" style="left:${left}%;width:${width}%;background:${color};"></div>
+  </div>`;
+}
+
+function renderMacro(data) {
+  const el = document.getElementById('macro-bar');
+  const m = data.macro;
+  const bias = m._bias || {};
+  const chips = [];
+
+  // Desk Bias
+  const biasColor = bias.score > 0 ? 'up' : bias.score < 0 ? 'down' : 'neutral';
+  chips.push(`<div class="macro-chip">
+    <span class="label">Desk Bias</span>
+    <span class="value ${biasColor}">${bias.label || '-'} (${bias.score > 0 ? '+' : ''}${bias.score || 0})</span>
+  </div>`);
+
+  // India VIX chip (from live WS data)
+  const vix = m['VIX'];
+  if (vix) {
+    const vixVal = vix.value != null ? fmtNum(vix.value, 2) : '-';
+    const vixRegime = vix.regime || '';
+    const vixColor = vixRegime.includes('FEAR') || vixRegime.includes('SPIKE') ? 'down'
+                   : vixRegime.includes('COMPLACENT') ? 'up' : 'neutral';
+    chips.push(`<div class="macro-chip">
+      <span class="label">VIX</span>
+      <span class="value ${vixColor}">${vixVal}</span>
+      <span class="change ${vixColor}">${vixRegime}</span>
+    </div>`);
+  }
+
+  // USDINR compact chip (card removed from main grid; surface here)
+  const usd = m['USDINR'];
+  if (usd) {
+    const usdVal = usd.value != null ? fmtNum(usd.value, 4) : '—';
+    const chg = usd.change_pct;
+    const usdColor = chg == null ? 'neutral' : chg > 0 ? 'down' : chg < 0 ? 'up' : 'neutral';
+    const chgText = chg == null ? (usd.value == null ? 'awaiting' : 'flat')
+                                : `${chg > 0 ? '+' : ''}${chg.toFixed(2)}%`;
+    chips.push(`<div class="macro-chip">
+      <span class="label">USDINR</span>
+      <span class="value ${usdColor}">${usdVal}</span>
+      <span class="change ${usdColor}">${chgText}</span>
+    </div>`);
+  }
+
+  el.innerHTML = chips.join('');
+
+  // FII/DII
+  const fiiEl = document.getElementById('fii-bar');
+  if (data.fii) {
+    const f = data.fii;
+    const fiiColor = f.fii_bias.includes('LONG') ? 'up' : 'down';
+    const diiColor = f.dii_bias.includes('LONG') ? 'up' : 'down';
+    fiiEl.style.display = 'flex';
+    const fmtCash = (n) => `${n >= 0 ? '+' : ''}₹${fmtNum(Math.round(n), 0)} cr`;
+    const cashTags = [];
+    if (f.fii_cash_net !== null && f.fii_cash_net !== undefined) {
+      const color = f.fii_cash_net >= 0 ? 'up' : 'down';
+      cashTags.push(`<span class="fii-tag bg-${color}">FII Cash ${fmtCash(f.fii_cash_net)}</span>`);
+    }
+    if (f.dii_cash_net !== null && f.dii_cash_net !== undefined) {
+      const color = f.dii_cash_net >= 0 ? 'up' : 'down';
+      cashTags.push(`<span class="fii-tag bg-${color}">DII Cash ${fmtCash(f.dii_cash_net)}</span>`);
+    }
+    fiiEl.innerHTML = `
+      <span class="text-xs dim">FII/DII (${f.date}):</span>
+      <span class="fii-tag bg-${fiiColor === 'up' ? 'up' : 'down'}">FII ${f.fii_bias} ${fmtNum(f.fii_fut_net, 0)}</span>
+      <span class="fii-tag bg-${diiColor === 'up' ? 'up' : 'down'}">DII ${f.dii_bias} ${fmtNum(f.dii_fut_net, 0)}</span>
+      ${cashTags.join('')}
+    `;
+  } else {
+    fiiEl.style.display = 'none';
+  }
+
+  // Sonar
+  const sonarEl = document.getElementById('sonar-bar');
+  if (data.sonar && data.sonar.length > 0) {
+    sonarEl.style.display = 'block';
+    sonarEl.innerHTML = '<span class="ora fw-600">SONAR:</span> ' +
+      data.sonar.map(s => `<span class="macro-chip" style="font-size:11px;"><span class="ora">[${s.catalyst_type}]</span> ${s.instrument}: ${s.summary}</span>`).join(' ');
+  } else {
+    sonarEl.style.display = 'none';
+  }
+}
+
+function renderFocus(data) {
+  const el = document.getElementById('focus-panel');
+  if (!data.focus || data.focus.length === 0) {
+    el.innerHTML = '<div class="dim">No active focus names.</div>';
+    return;
+  }
+  el.innerHTML = data.focus.map((f, i) => `
+    <div class="focus-row">
+      <div class="focus-rank">${i + 1}</div>
+      <div class="focus-name">${f.display}</div>
+      <span class="focus-badge ${signalClass(f.signal)}">${f.signal}</span>
+      <span class="fw-600 ${colorVal(-f.z_score)}">Z ${f.z_score > 0 ? '+' : ''}${f.z_score.toFixed(2)}</span>
+      <span class="text-xs dim">Score ${f.score.toFixed(1)}</span>
+    </div>
+  `).join('');
+}
+
+function microZClass(mz) {
+  if (mz == null) return '';
+  if (mz >= 2)  return 'microz-short';
+  if (mz <= -2) return 'microz-long';
+  if (Math.abs(mz) >= 1) return 'microz-mild';
+  return '';
+}
+
+function verdictClass(confidence) {
+  if (confidence === 'HIGH') return 'verdict-high';
+  if (confidence === 'MED')  return 'verdict-med';
+  return 'verdict-low';
+}
+
+function gapBucketClass(bucket) {
+  if (!bucket) return '';
+  if (bucket.includes('LARGE_GAP_UP')) return 'gap-large-up';
+  if (bucket.includes('SMALL_GAP_UP')) return 'gap-small-up';
+  if (bucket.includes('LARGE_GAP_DN')) return 'gap-large-dn';
+  if (bucket.includes('SMALL_GAP_DN')) return 'gap-small-dn';
+  return 'gap-flat';
+}
+
+function renderPreOpen(data) {
+  const el = document.getElementById('pre-open-panel');
+  if (!el) return;
+  const rows = (data.pre_open || []);
+  if (rows.length === 0) {
+    el.innerHTML = '<div class="dim text-xs">No pre-open snapshot — radar still booting or prior-close not seeded.</div>';
+    return;
+  }
+  el.innerHTML = rows.map(r => {
+    if (r.prior_close == null) {
+      return `<div class="po-row dim"><span class="po-name">${r.display}</span><span>prior-close n/a</span></div>`;
+    }
+    if (r.gap_pct == null) {
+      return `<div class="po-row dim"><span class="po-name">${r.display}</span><span>prior ${fmtNum(r.prior_close, 2)} — waiting for first tick</span></div>`;
+    }
+    const cls = gapBucketClass(r.gap_bucket);
+    const sign = r.gap_pct > 0 ? '+' : '';
+    return `<div class="po-row ${cls}">
+      <span class="po-name">${r.display}</span>
+      <span class="po-prior">prior ${fmtNum(r.prior_close, 2)}</span>
+      <span class="po-arrow">→</span>
+      <span class="po-now">${fmtNum(r.open_or_ltp, 2)}</span>
+      <span class="po-gap"><strong>${sign}${r.gap_pct.toFixed(2)}%</strong></span>
+      <span class="po-bucket">${r.gap_bucket}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderInstruments(data) {
+  const el = document.getElementById('inst-grid');
+  const driverAmber = data.driver_amber || {};
+  el.innerHTML = data.symbols.map(s => {
+    const ltpClass = s.ltp_style.includes('green') ? 'up' : s.ltp_style.includes('red') ? 'down' : 'neutral';
+    let border = cardBorderClass(s.action_signal, s.sig_state);
+    const sigBg = signalClass(s.action_signal);
+
+    // V5.2: amber pre-alert border override (only if no full-alert border set)
+    // Full-alert borders take precedence; amber ONLY paints when sig_state < 1
+    if (s.amber_active && s.sig_state < 1 && !border) {
+      border = s.amber_side > 0 ? 'amber-long' : s.amber_side < 0 ? 'amber-short' : 'amber-warn';
+    }
+
+    // Thesis readout
+    let thesis = '-';
+    if (s.sig_state === 2 && s.thesis_age_secs > 0) {
+      const m = Math.floor(s.thesis_age_secs / 60);
+      const sec = Math.floor(s.thesis_age_secs % 60);
+      if (s.regime_shift_alert) thesis = `<span class="down fw-700">SHIFT ${m}m</span>`;
+      else if (m >= 20) thesis = `<span class="dim">KILLED ${m}m</span>`;
+      else if (m >= 15) thesis = `<span class="down fw-600">STALE ${m}m</span>`;
+      else if (m >= 10) thesis = `<span class="ora">AGING ${m}m</span>`;
+      else thesis = `<span class="warn">${String(m).padStart(2,'0')}m${String(sec).padStart(2,'0')}s</span>`;
+    }
+
+    let sigText = s.action_signal;
+    if (s.sonar_tag) sigText += ` *${s.sonar_tag}*`;
+
+    // Phase 1: setup label + conviction stars (only when confirmed, sig_state=2)
+    let setupBadge = '';
+    let convictionStars = '';
+    if (s.sig_state === 2 && s.setup_label && s.conviction_score > 0) {
+      setupBadge = `<span class="setup-tag">${s.setup_label}</span>`;
+      const filled = '★'.repeat(s.conviction_score);
+      const empty = '·'.repeat(5 - s.conviction_score);
+      convictionStars = `<span class="conviction">${filled}<span class="conviction-dim">${empty}</span></span>`;
+    }
+
+    // Phase 1: event blackout tag
+    const blackoutTag = s.event_blackout_reason
+      ? `<span class="blackout-tag">BLACKOUT: ${s.event_blackout_reason}</span>` : '';
+
+    // V5.2: amber pre-alert chip (only when sig_state < 1)
+    let amberTag = '';
+    if (s.amber_active && s.sig_state < 1) {
+      const sideClass = s.amber_side > 0 ? 'long' : s.amber_side < 0 ? 'short' : '';
+      const arrow = s.amber_side > 0 ? '↑' : s.amber_side < 0 ? '↓' : '';
+      let reason = s.amber_reason || '';
+      if (reason === 'DRIVER' && driverAmber.nifty_source && s.display === 'NIFTY') {
+        reason = driverAmber.nifty_source;
+      }
+      amberTag = `<span class="amber-tag ${sideClass}">AMBER ${arrow} ${reason}</span>`;
+    }
+
+    // V5.2: tick-rate spike chip
+    const spikeTag = s.tick_rate_spike
+      ? `<span class="spike-tag" title="Ticks/s ${s.tick_rate_short.toFixed(1)} vs baseline ${s.tick_rate_baseline.toFixed(1)}">⚡ BURST</span>`
+      : '';
+
+    // V5.2: μZ metric (15-min de-anchored Z)
+    const mz = (s.micro_std_dev > 0) ? s.micro_z_score : null;
+    const microZCell = (mz != null)
+      ? `<span class="v num ${microZClass(mz)}">${mz > 0 ? '+' : ''}${mz.toFixed(2)}</span>`
+      : `<span class="v num dim">--</span>`;
+
+    // When english verdict has real conviction, mark the card so CSS can
+    // demote the old action_signal + setup_label badges that may contradict.
+    let priorityClass = '';
+    if (s.english_confidence === 'HIGH') priorityClass = 'verdict-priority-high';
+    else if (s.english_confidence === 'MED') priorityClass = 'verdict-priority-med';
+
+    return `<div class="inst-card ${border} ${priorityClass}">
+      <div class="inst-header">
+        <span class="inst-name">${s.display}</span>
+        <span class="inst-ltp num ${ltpClass}">${fmtNum(s.ltp, 2)}</span>
+      </div>
+      <div class="inst-metrics">
+        <div class="inst-metric"><span class="k">VWAP</span><span class="v num">${fmtNum(s.vwap, 2)}</span></div>
+        <div class="inst-metric"><span class="k">Z-Score</span><span class="v num ${colorVal(-s.z_score)}">${s.z_score > 0 ? '+' : ''}${s.z_score.toFixed(4)}</span></div>
+        <div class="inst-metric"><span class="k">StdDev</span><span class="v num">${s.std_dev.toFixed(4)}</span></div>
+        <div class="inst-metric"><span class="k">μZ 15m</span>${microZCell}</div>
+        <div class="inst-metric"><span class="k">ER</span><span class="v num">${s.efficiency_ratio.toFixed(2)}</span></div>
+        <div class="inst-metric"><span class="k">Hurst</span><span class="v num ${s.hurst >= 0.55 ? 'mag' : ''}">${s.hurst.toFixed(2)}</span></div>
+        <div class="inst-metric"><span class="k">ATR</span><span class="v num">${s.atr.toFixed(1)}</span></div>
+        <div class="inst-metric"><span class="k">Regime</span><span class="v text-xs">${s.regime || '-'}</span></div>
+        <div class="inst-metric"><span class="k">Thesis</span><span class="v">${thesis}</span></div>
+        ${(s.book_imbalance !== undefined && Math.abs(s.book_imbalance) >= 0.05) ? `<div class="inst-metric"><span class="k">Book</span><span class="v num ${s.book_imbalance > 0 ? 'up' : 'down'}">${s.book_imbalance > 0 ? '+' : ''}${s.book_imbalance.toFixed(2)}</span></div>` : ''}
+        ${(s.gap_bucket) ? `<div class="inst-metric"><span class="k">Gap</span><span class="v num ${s.gap_bucket.includes('UP') ? 'up' : s.gap_bucket.includes('DN') ? 'down' : 'neutral'}">${s.gap_pct > 0 ? '+' : ''}${(s.gap_pct ?? 0).toFixed(2)}%</span></div>` : ''}
+        ${(s.cvd !== undefined && s.cvd !== 0) ? `<div class="inst-metric"><span class="k">CVD</span><span class="v num ${s.cvd > 0 ? 'up' : 'down'}">${s.cvd > 0 ? '+' : ''}${s.cvd.toLocaleString()}</span></div>` : ''}
+      </div>
+      ${zBarHTML(s.z_score)}
+      ${(s.english_verdict) ? `<div class="verdict-row ${verdictClass(s.english_confidence)}"><span class="verdict-label">${s.english_verdict}</span><span class="verdict-why">${s.english_why || ''}</span></div>` : ''}
+      ${(amberTag || spikeTag || setupBadge || convictionStars) ? `<div class="mt-4">${amberTag}${spikeTag}${setupBadge}${convictionStars}</div>` : ''}
+      <div class="inst-signal">
+        <span class="signal-badge ${sigBg}">${sigText}</span>
+        ${s.dynamic_regime ? `<span class="text-xs warn">${s.dynamic_regime}</span>` : ''}
+        ${blackoutTag}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderOIFlow(data) {
+  const el = document.getElementById('oi-flow-grid');
+  // Find NIFTY symbol for OI flow data
+  const nifty = data.symbols.find(s => s.display === 'NIFTY') || {};
+
+  const cards = [
+    { label: 'OI Flow', value: nifty.oi_flow_label || '---', color: flowColor(nifty.oi_flow_label) },
+    { label: 'CE/PE Divergence', value: nifty.oi_flow_ce_pe || '---', color: cepeColor(nifty.oi_flow_ce_pe) },
+    { label: 'CE OI RoC', value: (nifty.oi_roc_ce_atm != null ? (nifty.oi_roc_ce_atm > 0 ? '+' : '') + nifty.oi_roc_ce_atm.toFixed(1) + '%' : '---'), color: colorVal(-nifty.oi_roc_ce_atm) },
+    { label: 'PE OI RoC', value: (nifty.oi_roc_pe_atm != null ? (nifty.oi_roc_pe_atm > 0 ? '+' : '') + nifty.oi_roc_pe_atm.toFixed(1) + '%' : '---'), color: colorVal(-nifty.oi_roc_pe_atm) },
+    { label: 'Gamma Flush', value: nifty.gamma_flush_active ? (nifty.gamma_flush_side > 0 ? 'LONG' : 'SHORT') : '---', color: nifty.gamma_flush_active ? 'down' : 'neutral' },
+    { label: 'TPS', value: nifty.tps != null ? Math.round(nifty.tps) : '---', color: 'neutral' },
+  ];
+
+  el.innerHTML = cards.map(c => `
+    <div class="oi-card">
+      <div class="oi-label">${c.label}</div>
+      <div class="oi-value ${c.color}">${c.value}</div>
+    </div>
+  `).join('');
+}
+
+function flowColor(label) {
+  if (!label) return 'neutral';
+  if (label.includes('NEW LONGS') || label.includes('SHORT COVER')) return 'up';
+  if (label.includes('NEW SHORTS') || label.includes('LONG EXIT')) return 'down';
+  return 'neutral';
+}
+
+function cepeColor(label) {
+  if (!label) return 'neutral';
+  if (label.includes('PE WRITERS IN')) return 'up';     // Bullish
+  if (label.includes('CE WRITERS IN')) return 'down';    // Bearish
+  if (label.includes('STRADDLE')) return 'warn';
+  if (label.includes('UNWINDING')) return 'ora';
+  return 'neutral';
+}
+
+function renderV4(data) {
+  const el = document.getElementById('v4-panel');
+  const nifty = data.symbols.find(s => s.display === 'NIFTY') || {};
+
+  const rows = [
+    ['Straddle Box', nifty.implied_lower && nifty.implied_upper
+      ? `${fmtNum(nifty.implied_lower, 0)} - ${fmtNum(nifty.implied_upper, 0)} (${fmtNum(nifty.straddle_premium, 0)})`
+      : 'N/A'],
+    ['ATR', nifty.atr ? `${nifty.atr.toFixed(1)}` : 'warmup'],
+    ['Dynamic Regime', nifty.dynamic_regime || '---'],
+    ['Anchor Gate', nifty.anchor_gate || '---'],
+    ['OI Flow', `${nifty.oi_flow_label || '---'} | ${nifty.oi_flow_ce_pe || '---'}`],
+  ];
+
+  el.innerHTML = rows.map(([k, v]) => `<div class="kv-row"><span class="k">${k}</span><span class="v fw-600">${v}</span></div>`).join('');
+}
+
+function renderPCR(data) {
+  const el = document.getElementById('pcr-panel');
+  const p = data.pcr;
+
+  if (!p || p.ratio == null) {
+    el.innerHTML = '<div class="dim">Awaiting OI data...</div>';
+    return;
+  }
+
+  const ceArrow = p.ce_delta > 0 ? '&#9650;' : p.ce_delta < 0 ? '&#9660;' : '';
+  const peArrow = p.pe_delta > 0 ? '&#9650;' : p.pe_delta < 0 ? '&#9660;' : '';
+
+  const rows = [
+    ['PCR (ATM)', `<span class="fw-700 ${p.ratio > 1 ? 'up' : p.ratio < 0.8 ? 'down' : 'warn'}">${p.ratio.toFixed(2)}</span>`],
+    ['ATM Strike', p.atm_strike || '-'],
+    ['CE OI', `${fmtNum(p.ce_total, 0)} <span class="${colorVal(-p.ce_delta)}">${ceArrow} ${fmtNum(Math.abs(p.ce_delta), 0)}</span>`],
+    ['PE OI', `${fmtNum(p.pe_total, 0)} <span class="${colorVal(p.pe_delta)}">${peArrow} ${fmtNum(Math.abs(p.pe_delta), 0)}</span>`],
+    ['Strikes', `<span class="text-xs dim">${(p.strikes || []).join(', ')}</span>`],
+  ];
+
+  el.innerHTML = rows.map(([k, v]) => `<div class="kv-row"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');
+}
+
+function renderDrivers(data) {
+  const el = document.getElementById('drivers-grid');
+  const drivers = data.drivers || [];
+  if (drivers.length === 0) {
+    el.innerHTML = '<div class="dim">Warming up...</div>';
+    return;
+  }
+  el.innerHTML = drivers.map(d => {
+    if (d.stale) {
+      return `<div class="driver-card">
+        <div class="driver-head">
+          <span class="driver-pair">${d.pair_a} &#8596; ${d.pair_b}</span>
+          <span class="driver-corr dim">warmup</span>
+        </div>
+      </div>`;
+    }
+    const abs = Math.abs(d.corr);
+    const corrClass = abs >= 0.7 ? 'strong' : abs >= 0.4 ? 'medium' : 'weak';
+    let lagStr;
+    if (d.lead_lag_secs > 0) lagStr = `${d.pair_a} leads +${d.lead_lag_secs}s`;
+    else if (d.lead_lag_secs < 0) lagStr = `${d.pair_b} leads +${-d.lead_lag_secs}s`;
+    else lagStr = 'coincident';
+    const flag = d.drag
+      ? `<span class="driver-flag ${d.drag.toLowerCase()}">${d.drag}</span>`
+      : '';
+    const detail = d.drag && d.drag_detail
+      ? `<div class="driver-detail">${d.drag_detail}</div>` : '';
+    return `<div class="driver-card">
+      <div class="driver-head">
+        <span class="driver-pair">${d.pair_a} &#8596; ${d.pair_b}${flag}</span>
+        <span class="driver-corr ${corrClass}">${d.corr >= 0 ? '+' : ''}${d.corr.toFixed(2)}</span>
+      </div>
+      <div class="driver-meta">
+        <span>${lagStr} (r=${d.lead_corr >= 0 ? '+' : ''}${d.lead_corr.toFixed(2)})</span>
+        <span>n=${d.n_points}</span>
+      </div>
+      ${detail}
+    </div>`;
+  }).join('');
+}
+
+function renderOILevels(data) {
+  const el = document.getElementById('oi-levels-body');
+  const levels = data.oi_levels || {};
+  const symbols = Object.keys(levels);
+  const engineEmpty = symbols.length === 0;
+  const engineCards = engineEmpty ? '' : symbols.map(sym => {
+    const lvl = levels[sym];
+    if (lvl.stale) {
+      const spotStr = lvl.spot > 0
+        ? ` &middot; spot ${lvl.spot.toLocaleString('en-IN', {maximumFractionDigits: 1})}`
+        : '';
+      return `<div class="oilvl-card">
+        <div class="oilvl-head">
+          <span class="oilvl-symbol">${lvl.symbol}</span>
+          <span class="oilvl-stale">stale &mdash; ${lvl.stale_reason}${spotStr}</span>
+        </div>
+      </div>`;
+    }
+    const pull = lvl.max_pain > lvl.spot ? '\u2191'
+               : lvl.max_pain < lvl.spot ? '\u2193' : '\u2192';
+    const distSign = lvl.max_pain_dist_pct >= 0 ? '+' : '';
+    const ceRows = (lvl.ce_walls || []).map((w, i) => `
+      <div class="oilvl-wall-row ce">
+        <span><span class="strike">R${i+1} ${w.strike.toLocaleString('en-IN')}</span><span class="dist">(${w.dist_pct >= 0 ? '+' : ''}${w.dist_pct.toFixed(2)}%)</span></span>
+        <span class="oi">${(w.oi/1e5).toFixed(1)}L</span>
+      </div>`).join('');
+    const peRows = (lvl.pe_walls || []).map((w, i) => `
+      <div class="oilvl-wall-row pe">
+        <span><span class="strike">S${i+1} ${w.strike.toLocaleString('en-IN')}</span><span class="dist">(${w.dist_pct >= 0 ? '+' : ''}${w.dist_pct.toFixed(2)}%)</span></span>
+        <span class="oi">${(w.oi/1e5).toFixed(1)}L</span>
+      </div>`).join('');
+    const ceBlock = ceRows || '<div class="dim" style="font-size:11px;">no CE OI in band</div>';
+    const peBlock = peRows || '<div class="dim" style="font-size:11px;">no PE OI in band</div>';
+    return `<div class="oilvl-card">
+      <div class="oilvl-head">
+        <span class="oilvl-symbol">${lvl.symbol}</span>
+        <span>
+          <span class="oilvl-meta">spot</span>
+          <span class="oilvl-spot">${lvl.spot.toLocaleString('en-IN', {maximumFractionDigits: 1})}</span>
+          &nbsp;&nbsp;
+          <span class="oilvl-meta">Max-Pain</span>
+          <span class="oilvl-maxpain">${lvl.max_pain.toLocaleString('en-IN')}</span>
+          <span class="oilvl-maxpain-dist">${distSign}${lvl.max_pain_dist_pct.toFixed(2)}% ${pull}</span>
+        </span>
+        <span class="oilvl-meta">${lvl.n_strikes} strikes &middot; ${lvl.expiry}</span>
+      </div>
+      <div class="oilvl-walls">
+        <div class="oilvl-side">
+          <div class="oilvl-side-title ce">Resistance (CE walls)</div>
+          ${ceBlock}
+        </div>
+        <div class="oilvl-side">
+          <div class="oilvl-side-title pe">Support (PE walls)</div>
+          ${peBlock}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Full-chain OI overlay — appended below engine cards when REST snapshot is live.
+  const chain = data.oi_chain;
+  let chainCard = '';
+  if (chain && chain.available) {
+    const ageSec = chain.last_refresh_ts
+      ? Math.max(0, Math.round(Date.now() / 1000 - chain.last_refresh_ts))
+      : -1;
+    const mpDistSign = chain.max_pain_dist_pct >= 0 ? '+' : '';
+    const mpPull = chain.max_pain_full_chain > chain.live_spot ? '↑'
+                 : chain.max_pain_full_chain < chain.live_spot ? '↓' : '→';
+    const win = (chain.near_atm && chain.near_atm.window) || [];
+    const winRows = win.map(r => {
+      const distSign = r.dist_pct >= 0 ? '+' : '';
+      const atmCls = r.is_atm ? ' is-atm' : '';
+      return `<div class="oichain-row${atmCls}">
+        <span class="strike">${r.strike.toLocaleString('en-IN')}</span>
+        <span class="dist">${distSign}${r.dist_pct.toFixed(2)}%</span>
+        <span><span class="ce">CE ${(r.call_oi/1e5).toFixed(1)}L</span></span>
+        <span><span class="pe">PE ${(r.put_oi/1e5).toFixed(1)}L</span></span>
+      </div>`;
+    }).join('');
+    const topCalls = (chain.deep_clusters && chain.deep_clusters.top_calls) || [];
+    const topPuts = (chain.deep_clusters && chain.deep_clusters.top_puts) || [];
+    const deepCallRows = topCalls.map(c => {
+      const sign = c.dist_pct >= 0 ? '+' : '';
+      return `<div class="oichain-row">
+        <span class="strike">${c.strike.toLocaleString('en-IN')}</span>
+        <span class="dist">${sign}${c.dist_pct.toFixed(2)}%</span>
+        <span><span class="ce">CE ${(c.oi/1e5).toFixed(1)}L</span></span>
+        <span></span>
+      </div>`;
+    }).join('') || '<div class="dim" style="font-size:11px;">no far-OTM call cluster</div>';
+    const deepPutRows = topPuts.map(p => {
+      const sign = p.dist_pct >= 0 ? '+' : '';
+      return `<div class="oichain-row">
+        <span class="strike">${p.strike.toLocaleString('en-IN')}</span>
+        <span class="dist">${sign}${p.dist_pct.toFixed(2)}%</span>
+        <span></span>
+        <span><span class="pe">PE ${(p.oi/1e5).toFixed(1)}L</span></span>
+      </div>`;
+    }).join('') || '<div class="dim" style="font-size:11px;">no far-OTM put cluster</div>';
+
+    chainCard = `<div class="oichain-card">
+      <div class="oichain-head">
+        <span class="oichain-title">Full Chain &middot; ${chain.n_strikes} strikes &middot; ${chain.expiry}</span>
+        <span>
+          <span class="oichain-headstat"><span class="lbl">Spot</span><span class="val">${chain.live_spot.toLocaleString('en-IN', {maximumFractionDigits: 1})}</span></span>
+          <span class="oichain-headstat"><span class="lbl">Max Pain</span><span class="val">${chain.max_pain_full_chain.toLocaleString('en-IN')}</span> <span class="dim">${mpDistSign}${chain.max_pain_dist_pct.toFixed(2)}% ${mpPull}</span></span>
+          <span class="oichain-headstat"><span class="lbl">PCR</span><span class="val">${chain.pcr_full_chain.toFixed(3)}</span></span>
+        </span>
+      </div>
+      <div class="oichain-grid">
+        <div>
+          <div class="oichain-section-title">Near-ATM (live spot ± 5)</div>
+          ${winRows || '<div class="dim" style="font-size:11px;">no strikes in window</div>'}
+        </div>
+        <div>
+          <div class="oichain-section-title">Deep OI Clusters (beyond window)</div>
+          ${deepCallRows}
+          ${deepPutRows}
+        </div>
+      </div>
+      <div class="oichain-meta">Refreshed ${ageSec >= 0 ? ageSec + 's' : '?'} ago${chain.last_error ? '  &middot;  warning: ' + chain.last_error : ''}</div>
+    </div>`;
+  } else if (chain && chain.last_error) {
+    chainCard = `<div class="oichain-meta">Full chain unavailable &mdash; ${chain.last_error}</div>`;
+  }
+
+  if (engineEmpty && !chainCard) {
+    el.innerHTML = '<div class="dim">Warming up...</div>';
+    return;
+  }
+  el.innerHTML = engineCards + chainCard;
+}
+
+/* ================================================================
+   GLOBAL INDICES
+   ================================================================ */
+function renderGlobalIndices(data) {
+  const el = document.getElementById('global-indices-body');
+  if (!el) return;
+  const gi = data.global_indices;
+  if (!gi || !gi.regions || Object.keys(gi.regions).length === 0) {
+    if (gi && gi.last_error) {
+      el.innerHTML = `<div class="dim">No data — ${gi.last_error}</div>`;
+    }
+    return;
+  }
+  // Render in a fixed region order so layout is stable across refreshes.
+  const order = ['India Lead', 'US', 'Europe', 'Asia'];
+  const parts = [];
+  for (const region of order) {
+    const rows = gi.regions[region];
+    if (!rows || rows.length === 0) continue;
+    const rowHtml = rows.map(r => {
+      const cls = r.change_pct >= 0 ? 'up' : 'down';
+      const sign = r.change_pct >= 0 ? '+' : '';
+      return `
+        <div class="gi-row">
+          <div class="gi-name">${r.display}</div>
+          <div class="gi-ltp">${fmtNum(r.ltp, 2)}</div>
+          <div class="gi-chg ${cls}">${sign}${r.change_pct.toFixed(2)}%</div>
+        </div>`;
+    }).join('');
+    parts.push(`
+      <div class="gi-region">
+        <div class="gi-region-title">${region}</div>
+        ${rowHtml}
+      </div>`);
+  }
+  let metaText = '';
+  if (gi.last_refresh_ts) {
+    const ageSec = Math.max(0, Math.round(Date.now() / 1000 - gi.last_refresh_ts));
+    metaText = `Refreshed ${ageSec}s ago`;
+    if (gi.last_error) metaText += `  ·  warning: ${gi.last_error}`;
+  }
+  parts.push(`<div class="gi-meta">${metaText}</div>`);
+  el.innerHTML = parts.join('');
+}
+
+/* ================================================================
+   TABS
+   ================================================================ */
+function setupTabs() {
+  const buttons = document.querySelectorAll('.tab-btn');
+  buttons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const target = btn.getAttribute('data-tab');
+      buttons.forEach(b => b.classList.toggle('active', b === btn));
+      document.querySelectorAll('.tab-content').forEach(panel => {
+        panel.style.display = panel.id === `tab-${target}` ? '' : 'none';
+      });
+    });
+  });
+}
+
+/* ================================================================
+   OI FLOW — ANCHORED VELOCITY CHART (handwritten dual-axis SVG)
+
+   Primary (left) axis: NIFTY spot line + dashed reference lines for
+     - Highest_PE_OI_Strike  (Dynamic Floor / Demand)   - dashed green
+     - Highest_CE_OI_Strike  (Dynamic Ceiling / Supply) - dashed red
+     - Max Pain               (Magnet)                   - dashed gray
+   Secondary (right) axis: continuous Flow Velocity lines
+     - ce_delta (Red)  — call writers inflow (+) / unwind (-)
+     - pe_delta (Green) — put writers inflow (+) / unwind (-)
+     - Hard zero line so divergences read instantly.
+
+   Confluence: a sweep of price into the dashed green floor that
+   coincides with the green pe_delta line spiking above zero is the
+   Liquidity Sweep signature — visible in one glance.
+   ================================================================ */
+function renderOIFlowTimeline(data) {
+  const el = document.getElementById('oi-flow-tl-body');
+  if (!el) return;
+  const tl = data.oi_flow_timeline;
+  if (!tl || !tl.samples || tl.samples.length < 2) {
+    el.innerHTML = '<div class="oiflow-tl-empty">Building history…</div>';
+    return;
+  }
+  const samples = tl.samples;
+  const tsNow = tl.ts_now;
+  const windowSecs = tl.window_secs || 1800;
+  const tsMin = tsNow - windowSecs;
+  const tsMax = tsNow;
+
+  // Latest anchors — these are the dashed horizontal reference lines.
+  const latest = samples[samples.length - 1];
+  const anchorPE = latest.top_pe_strike || 0;  // Dynamic floor
+  const anchorCE = latest.top_ce_strike || 0;  // Dynamic ceiling
+  const anchorMP = latest.max_pain || 0;        // Magnet
+
+  // ---------- Geometry ----------
+  const W = el.clientWidth || 1200;
+  const H = 280;
+  const M = { top: 14, right: 92, bottom: 26, left: 64 };
+  const innerW = W - M.left - M.right;
+  const innerH = H - M.top - M.bottom;
+  const innerLeft = M.left;
+  const innerRight = M.left + innerW;
+  const innerTop = M.top;
+  const innerBottom = M.top + innerH;
+
+  // ---------- Scales ----------
+  // Primary (price) — include spot range, NIFTY_FUT range, AND active anchors
+  // so the dashed lines and the futures overlay all land inside the chart.
+  const spotVals = samples.map(s => s.spot);
+  const futVals = samples.map(s => s.fut || 0).filter(v => v > 0);
+  const anchorVals = [anchorPE, anchorCE, anchorMP].filter(v => v > 0);
+  const allPrimary = spotVals.concat(futVals).concat(anchorVals);
+  const pMin = Math.min(...allPrimary);
+  const pMax = Math.max(...allPrimary);
+  const pPad = Math.max(2, (pMax - pMin) * 0.10);
+  const pLo = pMin - pPad;
+  const pHi = pMax + pPad;
+  const yP = (v) => innerBottom - ((v - pLo) / (pHi - pLo)) * innerH;
+
+  // Secondary (delta) — symmetric around zero so the zero line sits visually
+  // in the middle, making sign changes pop.
+  const ceDs = samples.map(s => s.ce_delta);
+  const peDs = samples.map(s => s.pe_delta);
+  const allDeltas = ceDs.concat(peDs);
+  const dAbsMax = Math.max(1, ...allDeltas.map(d => Math.abs(d)));
+  const dLo = -dAbsMax * 1.1;
+  const dHi =  dAbsMax * 1.1;
+  const yD = (v) => innerBottom - ((v - dLo) / (dHi - dLo)) * innerH;
+
+  // Time axis (shared)
+  const xOf = (ts) => innerLeft + Math.max(0, Math.min(innerW, ((ts - tsMin) / windowSecs) * innerW));
+
+  // ---------- Build SVG ----------
+  let svg = `<svg class="oiflow-tl-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" height="${H}">`;
+
+  // Background gridlines (5 horizontal, primary-axis-driven)
+  for (let i = 0; i <= 4; i++) {
+    const y = innerTop + (innerH * i / 4);
+    const pv = pHi - (pHi - pLo) * (i / 4);
+    const dv = dHi - (dHi - dLo) * (i / 4);
+    svg += `<line class="oiflow-tl-gridline" x1="${innerLeft}" y1="${y.toFixed(1)}" x2="${innerRight}" y2="${y.toFixed(1)}" />`;
+    // Left price labels
+    svg += `<text class="oiflow-tl-axis-label" x="${innerLeft - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end">${pv.toFixed(0)}</text>`;
+    // Right delta labels
+    const dStr = dv >= 0 ? '+' + Math.round(dv).toLocaleString('en-IN') : Math.round(dv).toLocaleString('en-IN');
+    svg += `<text class="oiflow-tl-axis-label" x="${innerRight + 6}" y="${(y + 3).toFixed(1)}" text-anchor="start" style="fill:#888">${dStr}</text>`;
+  }
+
+  // X-axis time ticks every 5 min
+  const firstTick = Math.ceil(tsMin / 300) * 300;
+  for (let t = firstTick; t <= tsMax; t += 300) {
+    const x = xOf(t);
+    const dt = new Date(t * 1000);
+    const lbl = String(dt.getHours()).padStart(2, '0') + ':' + String(dt.getMinutes()).padStart(2, '0');
+    svg += `<line class="oiflow-tl-axis-tick" x1="${x.toFixed(1)}" y1="${innerBottom}" x2="${x.toFixed(1)}" y2="${innerBottom + 4}" />`;
+    svg += `<text class="oiflow-tl-axis-label" x="${x.toFixed(1)}" y="${innerBottom + 16}" text-anchor="middle">${lbl}</text>`;
+  }
+
+  // Axis titles (left/right)
+  svg += `<text class="oiflow-tl-axis-title" x="${innerLeft - 6}" y="${(innerTop - 4).toFixed(1)}" text-anchor="end">PRICE</text>`;
+  svg += `<text class="oiflow-tl-axis-title" x="${innerRight + 6}" y="${(innerTop - 4).toFixed(1)}" text-anchor="start" style="fill:#888">Δ OI</text>`;
+
+  // ---------- Dashed anchor lines (primary axis) ----------
+  // Drawn first so they sit BEHIND the spot line.
+  const drawAnchor = (strike, color, label) => {
+    if (!strike || strike < pLo || strike > pHi) return '';
+    const y = yP(strike).toFixed(1);
+    return `
+      <line x1="${innerLeft}" y1="${y}" x2="${innerRight}" y2="${y}" stroke="${color}" stroke-width="1" stroke-dasharray="6 4" opacity="0.55" />
+      <text x="${innerRight - 4}" y="${(parseFloat(y) - 4).toFixed(1)}" text-anchor="end" style="font-size:9px;fill:${color};opacity:0.85;letter-spacing:0.4px">${label} ${strike.toLocaleString('en-IN')}</text>
+    `;
+  };
+  svg += drawAnchor(anchorPE, '#22c55e', 'PE WALL');
+  svg += drawAnchor(anchorCE, '#ef4444', 'CE WALL');
+  svg += drawAnchor(anchorMP, '#9ca3af', 'MAX PAIN');
+
+  // ---------- Zero line on secondary axis ----------
+  const yZero = yD(0);
+  svg += `<line x1="${innerLeft}" y1="${yZero.toFixed(1)}" x2="${innerRight}" y2="${yZero.toFixed(1)}" stroke="#ffffff" stroke-width="0.5" opacity="0.25" />`;
+
+  // ---------- Spot price polyline (primary) ----------
+  let spotPath = '';
+  samples.forEach((s, idx) => {
+    spotPath += (idx === 0 ? 'M' : 'L') + xOf(s.ts).toFixed(1) + ',' + yP(s.spot).toFixed(1) + ' ';
+  });
+  svg += `<path d="${spotPath.trim()}" fill="none" stroke="#22d3ee" stroke-width="1.6" />`;
+
+  // ---------- NIFTY_FUT overlay (primary) ----------
+  // Dotted yellow line on top of spot — basis divergence shows up as the
+  // gap between the two lines, and FUT slicing below the dashed PE WALL
+  // before spot does is the leading-indicator pattern for a breakdown.
+  // Breaks the path on samples where fut is missing (off-hours / pre-resolve)
+  // so we don't draw a misleading zero-pinned segment.
+  let futPath = '';
+  let futPenDown = false;
+  samples.forEach((s) => {
+    if (s.fut && s.fut > 0) {
+      futPath += (futPenDown ? 'L' : 'M') + xOf(s.ts).toFixed(1) + ',' + yP(s.fut).toFixed(1) + ' ';
+      futPenDown = true;
+    } else {
+      futPenDown = false;
+    }
+  });
+  if (futPath) {
+    svg += `<path d="${futPath.trim()}" fill="none" stroke="#facc15" stroke-width="1.2" stroke-dasharray="3 3" opacity="0.85" />`;
+  }
+
+  // ---------- Flow Velocity lines (secondary) ----------
+  const buildDeltaPath = (key) => {
+    let p = '';
+    samples.forEach((s, idx) => {
+      p += (idx === 0 ? 'M' : 'L') + xOf(s.ts).toFixed(1) + ',' + yD(s[key]).toFixed(1) + ' ';
+    });
+    return p.trim();
+  };
+  svg += `<path d="${buildDeltaPath('ce_delta')}" fill="none" stroke="#ef4444" stroke-width="1.2" opacity="0.95" />`;
+  svg += `<path d="${buildDeltaPath('pe_delta')}" fill="none" stroke="#22c55e" stroke-width="1.2" opacity="0.95" />`;
+
+  // ---------- "Now" marker — dashed vertical at right edge ----------
+  const nowX = xOf(tsNow);
+  svg += `<line x1="${nowX.toFixed(1)}" y1="${innerTop}" x2="${nowX.toFixed(1)}" y2="${innerBottom}" stroke="#22d3ee" stroke-width="0.7" stroke-dasharray="2 3" opacity="0.45" />`;
+
+  // ---------- Latest-value labels at right edge for live read ----------
+  const labelAt = (y, color, txt) => `<text x="${(innerRight + 30).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="start" style="font-size:10px;font-weight:700;fill:${color};dominant-baseline:middle">${txt}</text>`;
+  svg += labelAt(yP(latest.spot),        '#22d3ee', latest.spot.toFixed(0));
+  if (latest.fut && latest.fut > 0) {
+    svg += labelAt(yP(latest.fut),       '#facc15', latest.fut.toFixed(0));
+  }
+  svg += labelAt(yD(latest.ce_delta),    '#ef4444', (latest.ce_delta >= 0 ? '+' : '') + latest.ce_delta.toLocaleString('en-IN'));
+  svg += labelAt(yD(latest.pe_delta),    '#22c55e', (latest.pe_delta >= 0 ? '+' : '') + latest.pe_delta.toLocaleString('en-IN'));
+
+  svg += '</svg>';
+
+  // Legend
+  const legend = `<div class="oiflow-tl-legend">
+    <span class="item"><span class="swatch" style="background:#22d3ee"></span>Spot</span>
+    <span class="item"><span class="swatch" style="background:#facc15;border:1px dashed #facc15"></span>NIFTY FUT (basis lead)</span>
+    <span class="item"><span class="swatch" style="background:#22c55e;opacity:0.55;border:1px dashed #22c55e"></span>PE Wall (Floor)</span>
+    <span class="item"><span class="swatch" style="background:#ef4444;opacity:0.55;border:1px dashed #ef4444"></span>CE Wall (Ceiling)</span>
+    <span class="item"><span class="swatch" style="background:#9ca3af;opacity:0.55;border:1px dashed #9ca3af"></span>Max Pain (Magnet)</span>
+    <span style="margin-left:14px"></span>
+    <span class="item"><span class="swatch" style="background:#ef4444"></span>Δ CE OI (writers/unwind)</span>
+    <span class="item"><span class="swatch" style="background:#22c55e"></span>Δ PE OI (writers/unwind)</span>
+  </div>`;
+
+  el.innerHTML = svg + legend;
+}
+
+/* ================================================================
+   MASTER RENDER
+   ================================================================ */
+function render(data) {
+  document.getElementById('session-badge').textContent = data.session || '-';
+  renderMacro(data);
+  renderPreOpen(data);
+  renderFocus(data);
+  renderInstruments(data);
+  renderDrivers(data);
+  renderOILevels(data);
+  renderOIFlow(data);
+  renderOIFlowTimeline(data);
+  renderV4(data);
+  renderPCR(data);
+  renderGlobalIndices(data);
+}
+
+/* ================================================================
+   BOOT
+   ================================================================ */
+setupTabs();
+connect();
+</script>
+</body>
+</html>

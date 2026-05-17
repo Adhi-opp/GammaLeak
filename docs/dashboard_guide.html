@@ -1,0 +1,186 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>GammaLeak Dashboard — Quantifications Guide</title>
+<style>
+  :root { --ink:#111; --dim:#555; --rule:#ddd; --accent:#0b5; --warn:#c70; --red:#c33; --blue:#06c; }
+  html,body { margin:0; padding:0; background:#fff; color:var(--ink); font-family: "Inter", Arial, sans-serif; font-size:12px; line-height:1.45; }
+  .page { max-width: 780px; margin: 0 auto; padding: 24px 28px; }
+  h1 { font-size:20px; margin:0 0 2px; }
+  h2 { font-size:14px; margin:18px 0 4px; border-bottom:1px solid var(--rule); padding-bottom:3px; }
+  h3 { font-size:12px; margin:10px 0 2px; color:var(--blue); }
+  p, li { font-size:12px; margin:3px 0; }
+  code, .mono { font-family: "JetBrains Mono", Consolas, monospace; font-size:11px; background:#f4f4f4; padding:0 3px; border-radius:2px; }
+  .sub { color:var(--dim); font-size:11px; }
+  table { width:100%; border-collapse:collapse; margin:4px 0 8px; }
+  th,td { text-align:left; vertical-align:top; padding:3px 6px; border-bottom:1px solid var(--rule); font-size:11.5px; }
+  th { background:#f7f7f7; font-weight:600; }
+  td.term { white-space:nowrap; font-family:"JetBrains Mono", Consolas, monospace; font-weight:600; width:18%; }
+  td.range { white-space:nowrap; color:var(--dim); width:18%; font-family:"JetBrains Mono", Consolas, monospace; }
+  .tag { display:inline-block; padding:0 5px; border-radius:3px; font-size:10px; font-weight:600; }
+  .t-g { background:#e6f7ee; color:#065; }
+  .t-y { background:#fdf6d9; color:#7a5a00; }
+  .t-r { background:#fce4e4; color:#a11; }
+  .t-b { background:#e3efff; color:#034; }
+  .callout { border-left:3px solid var(--accent); background:#f7fdf9; padding:6px 10px; margin:6px 0; font-size:11.5px; }
+  .warn { border-left-color:var(--warn); background:#fff8ea; }
+  ul { margin:3px 0 6px 18px; padding:0; }
+  @media print {
+    .page { padding: 14mm; max-width: none; }
+    h2 { page-break-after: avoid; }
+    table, .callout { page-break-inside: avoid; }
+    a { color: inherit; text-decoration: none; }
+  }
+  .toprule { font-size:10px; color:var(--dim); }
+  .howuse { font-style: italic; color:#333; }
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1>GammaLeak Dashboard — Quantifications Guide</h1>
+<div class="toprule">For live use. Everything below is computed from real Upstox ticks — no simulated data. Signals are <b>display-only</b>; sizing and execution are yours.</div>
+
+<h2>1. Macro header</h2>
+<p>Top strip. Spot refs you trade <i>around</i>, not instruments you trade directly.</p>
+<table>
+<tr><th>Term</th><th>What it is</th><th>How to read</th></tr>
+<tr><td class="term">DXY</td><td>US Dollar Index proxy</td><td>Rising DXY = ₹ pressure, FII outflow risk, often NIFTY drag.</td></tr>
+<tr><td class="term">USDINR</td><td>Rupee vs USD spot</td><td>Rising = rupee weakening. Same directional read as DXY for NIFTY.</td></tr>
+<tr><td class="term">CRUDE</td><td>Crude oil</td><td>Sharp up = inflation/input-cost risk for India; BN banks de-rate. Sharp down = risk-on tailwind.</td></tr>
+<tr><td class="term">BTC</td><td>Bitcoin</td><td>Global risk-appetite proxy only. Don't trade from it; use as confirmation.</td></tr>
+</table>
+
+<h2>2. Per-symbol row (main table)</h2>
+<p class="sub">One row per tracked symbol. Read left-to-right: price → deviation → regime → flow → signal.</p>
+
+<h3>2.1 Price &amp; deviation</h3>
+<table>
+<tr><th>Term</th><th>Range / unit</th><th>Meaning &amp; use</th></tr>
+<tr><td class="term">LTP</td><td class="range">₹ price</td><td>Last traded price from the live tick.</td></tr>
+<tr><td class="term">Chg%</td><td class="range">%</td><td>Intraday change vs prev close.</td></tr>
+<tr><td class="term">VWAP</td><td class="range">₹ price</td><td>Volume-weighted avg price since open. Price <b>above</b> VWAP = intraday bulls in control; <b>below</b> = bears.</td></tr>
+<tr><td class="term">Z</td><td class="range">−5 … +5 (capped)</td><td>How many SDs price is from its short-window mean. <b>|Z|≥2</b> = stretched → fade candidate. <b>|Z|≥3</b> = extreme. Z is <i>capped</i> so outliers don't distort.</td></tr>
+<tr><td class="term">SD</td><td class="range">₹</td><td>Rolling standard deviation with an <b>ATR-based floor</b> (prevents Z from exploding in quiet sessions). If SD ever looked "stuck high," that's the floor biting.</td></tr>
+</table>
+
+<h3>2.2 Regime indicators</h3>
+<table>
+<tr><th>Term</th><th>Range</th><th>Meaning</th></tr>
+<tr><td class="term">ER</td><td class="range">0 … 1</td><td><b>Efficiency Ratio.</b> |net move| / sum|per-bar moves|. <b>High (&gt;0.5)</b> = clean trend, <b>don't fade</b>. <b>Low (&lt;0.3)</b> = chop/mean-revert, fades work.</td></tr>
+<tr><td class="term">HR</td><td class="range">0 … 1</td><td><b>Hurst exponent.</b> Memory / persistence of returns. <b>&gt;0.55</b> = trending; <b>&lt;0.45</b> = mean-reverting; <b>≈0.5</b> = random walk. Pair with ER — both low is the cleanest fade setup.</td></tr>
+<tr><td class="term">Drift</td><td class="range">signed</td><td>Short-horizon directional bias. Used as a <b>fade guard</b>: a fade-long against strong negative drift is a bad trade — GammaLeak now inverts correctly (prior bug fixed).</td></tr>
+</table>
+
+<div class="callout">
+<b>Fade-quality checklist:</b> |Z|≥2 AND ER&lt;0.3 AND HR&lt;0.45 AND drift aligned with fade direction. Those four together = high-conviction fade. Miss one → drop a star.
+</div>
+
+<h3>2.3 Options flow (per underlying)</h3>
+<table>
+<tr><th>Term</th><th>Range</th><th>Meaning</th></tr>
+<tr><td class="term">PCR</td><td class="range">0.4 … 2.0</td><td><b>Put-Call OI Ratio</b> (ATM±10 strikes). <b>&gt;1.3</b> = put-heavy (support forming → contrarian bullish). <b>&lt;0.7</b> = call-heavy (supply → contrarian bearish). Extreme PCR at pin = expiry risk.</td></tr>
+<tr><td class="term">ΔOI / OI flow</td><td class="range">± lakh contracts</td><td>Net change in total OI this window. <b>+CE / −PE</b> = writers selling calls (bearish/cap). <b>+PE / −CE</b> = writers selling puts (bullish/floor). <b>Both rising</b> = straddle build (event pricing).</td></tr>
+</table>
+
+<h3>2.4 Signal state</h3>
+<table>
+<tr><th>State</th><th>Meaning</th></tr>
+<tr><td class="term">0</td><td>No setup. Ignore.</td></tr>
+<tr><td class="term">1</td><td><b>Primed</b> — stretched + regime favorable, waiting for trigger bar. Prep order, don't fire.</td></tr>
+<tr><td class="term">2</td><td><b>Confirmed</b> — fade trigger printed. This is where the <span class="tag t-b">setup label</span> + <span class="tag t-y">★ conviction</span> show.</td></tr>
+<tr><td class="term">2→0 / 1→0</td><td>Abort. <code>exit_ts</code> now recorded on <b>both</b> paths (fix shipped 2026-04-17) so the same stretch can't retrigger instantly.</td></tr>
+</table>
+
+<h3>2.5 Conviction stars (1–5 ★)</h3>
+<p>Displayed on State-2 signals only. Each point comes from:</p>
+<ul>
+  <li>+1 if <b>|Z| ≥ 2.5</b> (stretch)</li>
+  <li>+1 if <b>ER &lt; 0.3</b> (chop)</li>
+  <li>+1 if <b>HR &lt; 0.45</b> (mean-revert)</li>
+  <li>+1 if <b>drift aligns</b> with the fade direction</li>
+  <li>+1 if <b>OI flow aligns</b> (writers defending the level you're fading)</li>
+</ul>
+<p class="howuse">Default tier policy: trade ★★★★+ on NIFTY weekly, ★★★+ on liquid stocks, <b>skip ★★ and below</b> in real money until stats prove otherwise.</p>
+
+<h3>2.6 Setup labels</h3>
+<table>
+<tr><td class="term">VWAP RECLAIM</td><td>Price pierced VWAP then reclaimed it against the stretch. High-quality fade of the piercing move.</td></tr>
+<tr><td class="term">ORB BREAK</td><td>Opening-range break that's statistically stretched. Fade only if ER low — otherwise it'll keep trending.</td></tr>
+<tr><td class="term">EXHAUSTION REV</td><td>Stretch + dying momentum + OI flow turning. The classic reversal label.</td></tr>
+<tr><td class="term">FADE HIGH / FADE LOW</td><td>Generic mean-reversion label when no specialized pattern fires. Lowest-priority of the labels.</td></tr>
+<tr><td class="term">EXPIRY PIN</td><td>Price magnetizing to a big OI strike near expiry. Fade moves <i>away</i> from max-pain, not toward.</td></tr>
+</table>
+
+<h3>2.7 Chips on the card</h3>
+<table>
+<tr><td><span class="tag t-y">BLACKOUT</span></td><td>Event window active (macro print ±15min, Thu 15:00–15:30 expiry pin, or item from <code>data/events.txt</code>). Engine is <b>silenced</b> — no new signals fire. Discretionary still yours.</td></tr>
+<tr><td><span class="tag t-b">setup label</span></td><td>Magenta chip on State-2 cards (see 2.6).</td></tr>
+<tr><td><span class="tag t-g">★★★★·</span></td><td>Conviction stars under the Z-bar on State-2 cards.</td></tr>
+</table>
+
+<h2>3. Index Drivers panel (Phase 2)</h2>
+<p>Three pair cards: <b>NIFTY↔BN</b>, <b>NIFTY↔RELIANCE</b>, <b>BN↔HDFCBANK</b>. Refreshes every 15s.</p>
+<table>
+<tr><th>Term</th><th>Range</th><th>Meaning</th></tr>
+<tr><td class="term">ρ (rho)</td><td class="range">−1 … +1</td><td>Pearson correlation of 1-second log returns over the last 5 min. <span class="tag t-g">≥ 0.7</span> moving together tightly, <span class="tag t-y">0.4–0.7</span> loose, <span class="tag t-r">&lt; 0.4</span> decoupled.</td></tr>
+<tr><td class="term">lead-lag</td><td class="range">−30s … +30s</td><td>Grid search, 5s steps. <b>Negative</b> = symbol A leads B; <b>positive</b> = B leads A. Use it to pick the <i>leading</i> leg for entries.</td></tr>
+<tr><td class="term"><span class="tag t-r">DRAG</span></td><td class="range">chip</td><td>Index is <b>lagging</b> its heavyweight — move is narrow, not broad. Fading the index against the heavyweight is risky; the index will eventually catch up.</td></tr>
+<tr><td class="term"><span class="tag t-g">BOOST</span></td><td class="range">chip</td><td>Index and heavyweight move in <b>same direction, index stronger</b>. Broad participation — trend is real.</td></tr>
+<tr><td class="term"><span class="tag t-y">DIVERGE</span></td><td class="range">chip</td><td>Opposite-sign Z. Low ρ + opposing moves. A heavyweight mean-revert trade; <b>don't</b> apply it to the index.</td></tr>
+</table>
+<div class="callout warn">
+<b>Policy (Phase 2):</b> this panel is display-only. It does <i>not</i> gate signals yet. If you see DRAG on NIFTY↔RELIANCE and a NIFTY fade-long signal fires, weigh skipping — this is the manual discretionary gate until Phase 4 promotes it.
+</div>
+
+<h2>4. OI Levels — Max-Pain &amp; Gamma Walls (Phase 3, NIFTY only)</h2>
+<p>Refreshes every 30s. Piggybacks on the 21-strike NIFTY chain (ATM±10, 50-pt step). BN has no chain subscription → no BN card by design.</p>
+
+<h3>4.1 Max-Pain</h3>
+<p>The strike that <b>minimizes total writer payout</b>. Formula:</p>
+<p class="mono">pain(P) = Σ max(0, P−K)·OI_CE(K) + Σ max(0, K−P)·OI_PE(K)</p>
+<p>P* is the gravity price market makers want spot to land on at expiry. Distance shown as <code>dist_pct</code> = (spot − max-pain) / spot.</p>
+<p class="howuse">Use: on expiry days and last 2 hours, expect price to drift <b>toward</b> max-pain unless a real news catalyst overrides. Fade moves <i>away</i> from it.</p>
+
+<h3>4.2 Gamma Walls</h3>
+<table>
+<tr><td class="term">CE wall (R1/R2/R3)</td><td>Call-OI cluster <b>above spot</b>. Writers defend it → acts as <b>resistance</b>. Rendered red.</td></tr>
+<tr><td class="term">PE wall (S1/S2/S3)</td><td>Put-OI cluster <b>below spot</b>. Writers defend it → acts as <b>support</b>. Rendered green.</td></tr>
+<tr><td class="term">Band</td><td>Walls filtered to ±3% of spot (far-OTM excluded). Top 3 per side by absolute OI.</td></tr>
+</table>
+
+<h3>4.3 Stale flag</h3>
+<p>Panel still renders with an explicit reason so the UI never goes blank:</p>
+<ul>
+  <li><b>no spot</b> — WebSocket hasn't delivered a spot tick yet</li>
+  <li><b>only N strikes</b> — &lt;5 strikes have non-zero OI (boot warmup)</li>
+  <li><b>no OI update yet</b> — chain keys subscribed but first OI tick hasn't arrived</li>
+  <li><b>OI Ns old</b> — last OI update &gt; 120s (connection issue, check logs)</li>
+</ul>
+
+<h2>5. How to use the whole screen in 10 seconds</h2>
+<ol>
+  <li><b>Check BLACKOUT chips first.</b> If active on your symbol, stand down.</li>
+  <li><b>Read drivers.</b> DRAG = don't fade the index.</li>
+  <li><b>Find a State-2 card</b> with a setup label + ≥3 stars.</li>
+  <li><b>Cross-check OI Levels.</b> Fade-long near PE wall (S1) = good. Fade-long into CE wall (R1) = bad, wall will reject.</li>
+  <li><b>Check max-pain distance.</b> On Thu afternoons, respect pin gravity — fades <i>toward</i> max-pain have extra tailwind.</li>
+  <li><b>Sizing is yours.</b> The tool does not execute.</li>
+</ol>
+
+<h2>6. Known limitations (be honest with yourself)</h2>
+<ul>
+  <li>BANKNIFTY has <b>no option chain</b> subscribed yet → no max-pain/walls for BN. Phase 3.5 queued.</li>
+  <li>Driver lead-lag grid is 5-second resolution; sub-5s lead shows as 0.</li>
+  <li>Phase 1–3 have not been live-validated at full scale yet — Monday 2026-04-20 is the first real session. Treat signals skeptically until accuracy stats confirm.</li>
+  <li>Conviction score weights are uniform (1 point each). If certain inputs prove stronger post-Monday, weights will be rebalanced.</li>
+</ul>
+
+<div class="callout warn">
+<b>Export:</b> Open this file in Chrome → <b>Ctrl+P</b> → Destination <b>Save as PDF</b> → Layout Portrait, Margins Default, Scale 100%. Background graphics <i>on</i> for the tag colors.
+</div>
+
+</div>
+</body>
+</html>

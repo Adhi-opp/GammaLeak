@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  gammaleak:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./research:/app/research
+      - ./historical:/app/historical
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0

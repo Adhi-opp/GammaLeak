@@ -1,0 +1,11 @@
+.git
+.env
+__pycache__
+*.pyc
+logs/
+historical/
+research/
+.venv
+node_modules
+*.md
+*.pdf

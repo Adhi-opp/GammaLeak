@@ -1,0 +1,59 @@
+# ============================================================
+# Secrets — NEVER commit these
+# ============================================================
+.env
+.env.*
+*.pem
+*.key
+oauth_tokens.json
+
+# ============================================================
+# Python
+# ============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# ============================================================
+# Local data — large + private + reproducible
+# ============================================================
+# Live log output (per-day, per-symbol) — large, contains user activity
+logs/
+# Cached historical pulls — reproducible via fetch_historical.py
+historical/
+# Research scratch (PDFs, CSVs, intermediate analyses)
+research/
+research_tmp/
+# Upstox instrument master cache — refetched on boot if missing
+data/
+
+# Third-party data caches
+.yfinance_cache/
+
+# ============================================================
+# Editor / OS
+# ============================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ============================================================
+# Build artifacts
+# ============================================================
+build/
+dist/
+*.spec
+preflight_results.txt
