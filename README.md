@@ -1,6 +1,6 @@
 # GammaLeak
 
-> **Real-time market-data streaming platform** — protobuf WebSocket decode, per-symbol async logging, layered signal-derivation engine, and a 4 Hz browser dashboard for Indian F&O microstructure. Built solo on the Upstox v3 feed as an industry project at BITS Pilani (BSc CS, online programme with honours).
+> **Real-time market-data streaming platform** — protobuf WebSocket decode, per-symbol async logging, layered signal-derivation engine, and a 4 Hz browser dashboard for Indian F&O microstructure on the Upstox v3 feed.
 
 ![Python](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white)
@@ -11,7 +11,7 @@
 
 ---
 
-## TL;DR (for reviewers / recruiters)
+## TL;DR
 
 | Aspect | Detail |
 |---|---|
@@ -82,7 +82,7 @@ flowchart LR
 
 ## Problem Statement
 
-An active F&O trader monitors 6+ instruments (NIFTY, BANKNIFTY, USDINR, Crude, RELIANCE, HDFCBANK) + options OI + global cues simultaneously. The three pathologies this tool addresses:
+Discretionary F&O traders monitor 6+ instruments (NIFTY, BANKNIFTY, USDINR, Crude, RELIANCE, HDFCBANK) + options OI + global cues simultaneously. The three pathologies this tool addresses:
 
 1. **Attention overload** — collapse everything into one HUD/dashboard that surfaces the *statistically anomalous* instrument in real time.
 2. **Late-tape problem** — after ~10:30 AM the session VWAP becomes "heavy" and micro-flushes stop registering in the session Z-score. Signals arrive *after* the move. The V5.2 Micro-Structural Layer adds a rolling 15-min anchor + Z-velocity + tick-rate + cross-asset acceleration amber to reclaim ~30–90 seconds of early warning.
@@ -135,7 +135,7 @@ The engine is an **additive** stack — every new layer was shipped *without* de
 | **V4.0** (Adaptive Regime) | `signals/regimes.py` — classifies `THE_PIN / EXPANSION / GAMMA_SQUEEZE`; also fans OI-flow classification per NIFTY tick | Dynamic threshold |
 | **V5.1** | Per-strike OI Δ flow classification (NEW LONGS / NEW SHORTS / SHORT COVER / LONG EXIT) — `orderflow/oi_flow.py` | Option-chain context |
 | **V5.2** (Micro-Structural) | `signals/momentum.py` — 4 additive early-warning layers (below) — display-only amber tier | **Does NOT touch `sig_state`** |
-| **Phase 5** (Order-Flow + English Verdict) | `orderflow/aggressor.py` — Lee-Ready aggressor on FUT legs → CVD → 5 divergence patterns (BUYER_EXHAUSTION / SELLER_EXHAUSTION / BREAKOUT_CONFIRMED / BUY_ABSORPTION / SELL_ABSORPTION) with pullback validation; `signals/verdicts.py` — plain-English composer (`FADE THE EXTREME`, `RIDE THE BREAKOUT`, `STAND ASIDE`, …) with confidence tier; spot→FUT verdict mirror | Display tier — drives recruiter-readable UI; underlying state machine unchanged |
+| **Phase 5** (Order-Flow + English Verdict) | `orderflow/aggressor.py` — Lee-Ready aggressor on FUT legs → CVD → 5 divergence patterns (BUYER_EXHAUSTION / SELLER_EXHAUSTION / BREAKOUT_CONFIRMED / BUY_ABSORPTION / SELL_ABSORPTION) with pullback validation; `signals/verdicts.py` — plain-English composer (`FADE THE EXTREME`, `RIDE THE BREAKOUT`, `STAND ASIDE`, …) with confidence tier; spot→FUT verdict mirror | Display tier — drives the dashboard's primary verdict label; underlying state machine unchanged |
 
 ### V5.2 Micro-Structural Layer
 
