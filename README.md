@@ -535,7 +535,6 @@ Upstox v3 WebSocket sends gzip-compressed Protobuf. At 50 ticks/s sustained and 
 | V5.0 | Apr 15, 2026 | NSE FII/DII participant OI integration |
 | V5.1 | Apr 16, 2026 | Per-strike OI Δ flow classification |
 | V5.2 | Apr 20, 2026 | Micro-Structural Layer (Micro-Z / Z-velocity / Tick-rate / Driver acceleration) + FastAPI browser dashboard + self-healing instrument master |
-| V6.0 — Refactor | May 2026 | Monolith split into `core / ui / orderflow / signals / analytics / gammaleak_runtime` packages; OI Levels (max-pain + gamma walls), OI-flow timeline + anchored velocity chart, global-indices service, WS silence watchdog + reconnect, retired one-off research scripts |
 
 ---
 
