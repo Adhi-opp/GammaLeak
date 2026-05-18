@@ -630,7 +630,9 @@ from gammaleak_runtime.io_logs import (
     LOG_STOP,
     _safe_filename,
     append_csv_rows,
+    append_event_row,
     disk_writer_task,
+    get_events_log_path,
     get_log_dir,
     get_log_path,
     get_symbol_log_path,
@@ -1473,6 +1475,11 @@ def update_signal_engine(
     if now_ist is None:
         now_ist = datetime.now(IST)
 
+    # Snapshot pre-tick state for event emission. alert_side is captured because
+    # ABORT (1→0) and EXIT (2→0) transitions zero it out before we'd record.
+    prev_sig_state = state.sig_state
+    prev_alert_side = state.alert_side
+
     profile = get_symbol_profile(instrument_key)
     base_alert_z = profile["alert_z"] * usdinr_z_multiplier(instrument_key, state.ltp)
     base_confirm_z = profile["confirm_z"] * usdinr_z_multiplier(instrument_key, state.ltp)
@@ -1515,6 +1522,17 @@ def update_signal_engine(
         state.conviction_score = 0
         reset_thesis_state(state)
         state.prev_z = state.z_score
+        if prev_sig_state != 0:
+            try:
+                append_event_row(
+                    timestamp=state.last_tick_ts or time.time(),
+                    symbol=get_display_name(instrument_key),
+                    event_type=("EXIT" if prev_sig_state == 2 else "ABORT"),
+                    side=prev_alert_side, z_score=state.z_score, ltp=state.ltp,
+                    regime=state.regime, setup_label="", conviction=0,
+                )
+            except Exception:
+                pass
         return
 
     regime_tags: list[str] = []
@@ -1795,6 +1813,32 @@ def update_signal_engine(
     if state.sig_state == 2 and state.setup_label and state.conviction_score > 0:
         stars = "★" * state.conviction_score + "·" * (5 - state.conviction_score)
         state.action_signal = f"[{state.setup_label} {stars}] {state.action_signal}"
+
+    # Emit a row to logs/<date>_events.csv if sig_state transitioned this tick.
+    # This is the ground-truth fire log that --review can grade against, instead
+    # of re-deriving signals from raw z-score crossings.
+    if prev_sig_state != state.sig_state:
+        if prev_sig_state == 0 and state.sig_state == 1:
+            evt, side = "ALERT", state.alert_side
+        elif prev_sig_state == 1 and state.sig_state == 2:
+            evt, side = "CONFIRM", state.alert_side
+        elif prev_sig_state == 1 and state.sig_state == 0:
+            evt, side = "ABORT", prev_alert_side
+        elif prev_sig_state == 2 and state.sig_state == 0:
+            evt, side = "EXIT", prev_alert_side
+        else:
+            evt, side = "STATE_CHANGE", prev_alert_side
+        try:
+            append_event_row(
+                timestamp=state.last_tick_ts or time.time(),
+                symbol=get_display_name(instrument_key),
+                event_type=evt, side=side,
+                z_score=state.z_score, ltp=state.ltp,
+                regime=state.regime, setup_label=state.setup_label or "",
+                conviction=state.conviction_score,
+            )
+        except Exception:
+            pass
 
     state.prev_z = z_score
 

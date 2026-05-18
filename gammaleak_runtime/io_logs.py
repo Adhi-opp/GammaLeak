@@ -21,7 +21,7 @@ from pathlib import Path
 # when the engine runs as `__main__` (Python treats the file as two modules:
 # `__main__` and `GammaLeak`, so re-importing it re-runs top-level
 # code mid-load).
-from core.config import IST, LOG_BATCH_SIZE, LOG_COLUMNS, LOG_DIR, LOG_FLUSH_INTERVAL_SECS
+from core.config import EVENT_LOG_COLUMNS, IST, LOG_BATCH_SIZE, LOG_COLUMNS, LOG_DIR, LOG_FLUSH_INTERVAL_SECS
 from core.state import console
 
 
@@ -47,6 +47,37 @@ def get_log_dir(trading_day: date | None = None) -> Path:
 
 def get_symbol_log_path(symbol: str, trading_day: date | None = None) -> Path:
     return get_log_dir(trading_day) / f"{_safe_filename(symbol)}.csv"
+
+
+def get_events_log_path(trading_day: date | None = None) -> Path:
+    active_day = trading_day or datetime.now(IST).date()
+    return LOG_DIR / f"{active_day.isoformat()}_events.csv"
+
+
+def append_event_row(
+    timestamp: float, symbol: str, event_type: str, side: int,
+    z_score: float, ltp: float, regime: str = "", setup_label: str = "",
+    conviction: int = 0,
+) -> None:
+    """Append one sig_state transition to logs/YYYY-MM-DD_events.csv.
+
+    Synchronous on purpose: transitions are low-rate (a handful per symbol per
+    day) so the disk_writer_task batching machinery is overkill. Header is
+    written lazily on first call of the day.
+    """
+    path = get_events_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists()
+    ts_ist = datetime.fromtimestamp(timestamp, IST).strftime("%Y-%m-%d %H:%M:%S")
+    row = (
+        f"{timestamp:.3f}", ts_ist, symbol, event_type, str(side),
+        f"{z_score:.4f}", f"{ltp:.4f}", regime, setup_label, str(conviction),
+    )
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        if write_header:
+            writer.writerow(EVENT_LOG_COLUMNS)
+        writer.writerow(row)
 
 
 def append_csv_rows(

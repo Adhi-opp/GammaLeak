@@ -59,6 +59,10 @@ LOG_COLUMNS = REQUIRED_LOG_COLUMNS + (
     "book_imb", "gap_pct", "gap_bucket", "verdict",
     "cvd", "min_buy", "min_sell", "divergence",
 )
+EVENT_LOG_COLUMNS = (
+    "timestamp", "timestamp_ist", "symbol", "event_type", "side",
+    "z_score", "ltp", "regime", "setup_label", "conviction",
+)
 LOG_BATCH_SIZE = 5  # Flush every 5 ticks (~100-500ms) to prevent data loss
 LOG_FLUSH_INTERVAL_SECS = 1.0
 
