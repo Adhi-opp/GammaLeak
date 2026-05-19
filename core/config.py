@@ -334,25 +334,43 @@ REVIEW_ENTRY_TOUCH = "touch"
 REVIEW_ENTRY_CONFIRM = "confirm"
 REVIEW_ENTRY_MODES = (REVIEW_ENTRY_TOUCH, REVIEW_ENTRY_CONFIRM)
 
-# Minimum favorable excursion (in instrument points) before a signal counts
-# as a success. Below this, the move is treated as noise / liquidity sweep
-# regardless of direction. Tuned per instrument's typical noise floor.
-# VIX uses an effectively unreachable threshold to keep it display-only.
+# Minimum favorable excursion (in instrument points) acting as the FLOOR for
+# the MFE threshold. The runtime threshold is max(K × ATR, floor), so on a
+# volatile day the bar scales up but never drops below this number — protects
+# against rewarding micro-grabs even when the engine briefly sees a quiet
+# regime. Tuned from 6 sessions (May 12–19 2026) of historical per-symbol
+# avg-MFE distributions:
+#   CRUDE 30 → 15 (avg MFE was 21.5, 30 was unreachable in normal regimes)
+#   RELIANCE 5 → 3, HDFCBANK 8 → 3 (those equities don't move enough; tighter
+#     floor surfaces what little real edge exists)
+# VIX stays at 999 (display-only by design).
 MIN_FAVORABLE_POINTS_PER_SYMBOL: dict[str, float] = {
     "NIFTY":      15.0,
     "NIFTY_FUT":  15.0,
     "BANKNIFTY":  40.0,
     "BN_FUT":     40.0,
-    "RELIANCE":    5.0,
-    "HDFCBANK":    8.0,
+    "RELIANCE":    3.0,
+    "HDFCBANK":    3.0,
     "SBIN":        3.0,
     "ICICIBANK":   5.0,
     "USDINR":      0.05,
-    "CRUDEOIL":   30.0,
+    "CRUDEOIL":   15.0,
     "VIX":       999.0,
 }
 # Fallback for any symbol not in the table above (~0.05% of entry price).
 REVIEW_DEFAULT_MIN_FAVORABLE_PCT = 0.05
+
+# ATR-scaled MFE threshold: runtime_bar = max(MFE_ATR_K × atr, floor)
+# K=0.5 means a "meaningful move" must clear half the recent 5-min range. On
+# a calm day (low ATR) the floor dominates; on a volatile day the bar scales
+# up so a 2-pt favorable tick in a 30-pt range still reads as noise — but
+# the bar doesn't demand a full-range reversion (which empirically rejected
+# too many real signals on index futures).
+MFE_ATR_K = 0.5
+# Lookback window for the ATR proxy in the review path (the per-tick CSV
+# doesn't carry an atr column, so we compute max-min range over the prior
+# N seconds of price ticks at signal time).
+MFE_ATR_PROXY_WINDOW_SECS = 300
 UPSTOX_CURRENCY_UNDERLYINGS = ("USDINR", "EURINR", "GBPINR", "JPYINR")
 
 

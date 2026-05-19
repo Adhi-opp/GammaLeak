@@ -1536,12 +1536,14 @@ def update_signal_engine(
         return
 
     # Per-symbol favorable-move threshold for the MFE-gated CONFIRM.
-    # Looks the symbol's display name up in MIN_FAVORABLE_POINTS_PER_SYMBOL;
-    # falls back to a percentage of the entry price for anything not listed.
+    # runtime_bar = max(MFE_ATR_K × state.atr, per-symbol floor)
+    # On a volatile day state.atr scales the bar up; on a calm day or cold
+    # start (atr=0), the floor dominates so noise can't cross by default.
     _display_for_mfe = get_display_name(instrument_key)
-    _min_fav_pts = MIN_FAVORABLE_POINTS_PER_SYMBOL.get(_display_for_mfe)
-    if _min_fav_pts is None:
-        _min_fav_pts = abs(state.ltp) * (REVIEW_DEFAULT_MIN_FAVORABLE_PCT / 100.0)
+    _mfe_floor = MIN_FAVORABLE_POINTS_PER_SYMBOL.get(_display_for_mfe)
+    if _mfe_floor is None:
+        _mfe_floor = abs(state.ltp) * (REVIEW_DEFAULT_MIN_FAVORABLE_PCT / 100.0)
+    _min_fav_pts = max(MFE_ATR_K * max(0.0, state.atr), float(_mfe_floor))
 
     # Update the running MFE for an active signal. Uses the entry price
     # captured at the 0→1 transition (or at a side flip during ALERT).
@@ -2692,18 +2694,50 @@ def calculate_mfe_points(side: int, entry_price: float, window_prices: np.ndarra
     return max(0.0, favorable_move)
 
 
-def resolve_min_favorable_pts(symbol: str, entry_price: float, override: float | None) -> float:
-    """Per-symbol threshold lookup with override priority.
+def resolve_min_favorable_pts(
+    symbol: str, entry_price: float, override: float | None,
+    atr_proxy: float = 0.0,
+) -> float:
+    """Per-symbol MFE threshold = max(MFE_ATR_K × atr_proxy, per-symbol floor).
 
-    Priority: explicit CLI override > MIN_FAVORABLE_POINTS_PER_SYMBOL > pct fallback.
+    Priority for the floor: explicit CLI override > MIN_FAVORABLE_POINTS_PER_SYMBOL
+    > percentage-of-entry fallback. ATR scaling lifts the bar on volatile days
+    while the floor protects against rewarding micro-grabs in calm regimes.
     """
     if override is not None and override > 0:
-        return float(override)
-    table_value = MIN_FAVORABLE_POINTS_PER_SYMBOL.get(symbol)
-    if table_value is not None:
-        return float(table_value)
-    # Symbol not in table — fall back to a percentage of entry price.
-    return abs(entry_price) * (REVIEW_DEFAULT_MIN_FAVORABLE_PCT / 100.0)
+        floor = float(override)
+    else:
+        table_value = MIN_FAVORABLE_POINTS_PER_SYMBOL.get(symbol)
+        if table_value is not None:
+            floor = float(table_value)
+        else:
+            floor = abs(entry_price) * (REVIEW_DEFAULT_MIN_FAVORABLE_PCT / 100.0)
+    atr_scaled = MFE_ATR_K * max(0.0, float(atr_proxy))
+    return max(atr_scaled, floor)
+
+
+def compute_atr_proxy(
+    timestamps: np.ndarray, prices: np.ndarray, signal_index: int,
+    window_secs: int = MFE_ATR_PROXY_WINDOW_SECS,
+) -> float:
+    """Approximate 5-min ATR from the per-tick price series in the review path.
+
+    Defined as `max(prices) - min(prices)` over the `window_secs` immediately
+    BEFORE the signal — i.e., the realized range the engine just saw. Returns
+    0.0 if there aren't enough prior ticks (cold start near session open).
+    """
+    if signal_index <= 0 or timestamps.size == 0 or prices.size == 0:
+        return 0.0
+    signal_ts = float(timestamps[signal_index])
+    window_start_ts = signal_ts - float(window_secs)
+    start_index = int(np.searchsorted(timestamps, window_start_ts, side="left"))
+    start_index = max(0, min(start_index, signal_index))
+    if start_index >= signal_index:
+        return 0.0
+    window = prices[start_index:signal_index + 1]
+    if window.size == 0:
+        return 0.0
+    return float(np.max(window) - np.min(window))
 
 
 def calculate_mae_z(side: int, entry_z: float, window_z_scores: np.ndarray) -> float | None:
@@ -2797,8 +2831,11 @@ def build_review_rows(
             mae_points = calculate_mae_points(side, entry_ltp, window_prices)
             mae_z = calculate_mae_z(side, float(review_event["entry_z"]), window_z_scores)
             mfe_points = calculate_mfe_points(side, entry_ltp, window_prices)
+            # ATR proxy over the prior MFE_ATR_PROXY_WINDOW_SECS — gives the
+            # threshold something to scale against on volatile days.
+            atr_proxy = compute_atr_proxy(timestamps, prices, event_index)
             min_favorable_pts = resolve_min_favorable_pts(
-                str(symbol), entry_ltp, min_favorable_pts_override,
+                str(symbol), entry_ltp, min_favorable_pts_override, atr_proxy,
             )
 
             if available_end_index < event_index or timestamps[-1] < target_timestamp:
