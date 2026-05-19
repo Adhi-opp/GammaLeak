@@ -55,6 +55,12 @@ class SymbolState:
     alert_side: int = 0
     peak_z: float = 0.0
     prev_z: float = 0.0
+    # MFE gating: capture entry price when ALERT fires + track running max
+    # favorable excursion. CONFIRM (1→2) requires signal_mfe_points to clear
+    # the per-symbol noise floor so a 2-pt liquidity sweep can't be promoted
+    # to a confirmed setup.
+    alert_entry_ltp: float = 0.0
+    signal_mfe_points: float = 0.0
 
     efficiency_ratio: float = 0.0
     hurst: float = 0.5

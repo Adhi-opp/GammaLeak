@@ -1535,6 +1535,24 @@ def update_signal_engine(
                 pass
         return
 
+    # Per-symbol favorable-move threshold for the MFE-gated CONFIRM.
+    # Looks the symbol's display name up in MIN_FAVORABLE_POINTS_PER_SYMBOL;
+    # falls back to a percentage of the entry price for anything not listed.
+    _display_for_mfe = get_display_name(instrument_key)
+    _min_fav_pts = MIN_FAVORABLE_POINTS_PER_SYMBOL.get(_display_for_mfe)
+    if _min_fav_pts is None:
+        _min_fav_pts = abs(state.ltp) * (REVIEW_DEFAULT_MIN_FAVORABLE_PCT / 100.0)
+
+    # Update the running MFE for an active signal. Uses the entry price
+    # captured at the 0→1 transition (or at a side flip during ALERT).
+    if state.alert_entry_ltp > 0.0 and state.alert_side != 0:
+        if state.alert_side > 0:        # fade short — favorable = price falling
+            _favorable = state.alert_entry_ltp - state.ltp
+        else:                           # fade long — favorable = price rising
+            _favorable = state.ltp - state.alert_entry_ltp
+        if _favorable > state.signal_mfe_points:
+            state.signal_mfe_points = _favorable
+
     regime_tags: list[str] = []
     er_trending = state.efficiency_ratio >= er_threshold
     hurst_trending = HURST_ENABLED and state.hurst >= hurst_threshold
@@ -1658,6 +1676,9 @@ def update_signal_engine(
             # Record alert fire for per-side cooldown
             state.last_alert_fire_ts = now_ts
             state.last_alert_fire_side = side
+            # MFE tracking: lock in entry, reset running favorable excursion
+            state.alert_entry_ltp = state.ltp
+            state.signal_mfe_points = 0.0
         else:
             state.action_signal = SIGNAL_NO_EDGE
             state.action_style = "dim white"
@@ -1707,6 +1728,12 @@ def update_signal_engine(
                 else:
                     state.action_signal = SIGNAL_STRETCH
                     state.action_style = "cyan"
+            elif state.signal_mfe_points < _min_fav_pts:
+                # Z reversed but price hasn't moved meaningfully — hold in ALERT.
+                # The MFE-retry block below will finalize the CONFIRM on a later
+                # tick if MFE catches up while Z stays in the exhausting band.
+                state.action_signal = f"{SIGNAL_STRETCH} | MFE PENDING"
+                state.action_style = "cyan"
             else:
                 state.sig_state = 2
                 state.action_signal, state.action_style = determine_confirmed_signal(
@@ -1728,6 +1755,9 @@ def update_signal_engine(
             state.action_style = "cyan"
             state.last_alert_fire_ts = now_ts
             state.last_alert_fire_side = side
+            # Side flip — reset MFE tracking against the new entry
+            state.alert_entry_ltp = state.ltp
+            state.signal_mfe_points = 0.0
         elif abs_z < exit_z:
             state.sig_state = 0
             state.alert_side = 0
@@ -1773,6 +1803,33 @@ def update_signal_engine(
             state.conviction_score = 0
             state.setup_label = ""
             reset_thesis_state(state)
+
+    # MFE-retry confirm: handles the case where Z reversed earlier with MFE
+    # still under the bar. On a later tick, if MFE has now cleared the per-symbol
+    # threshold AND Z is in the exhausting band (≤ confirm_z), upgrade to CONFIRM.
+    # Drift opposition is rechecked here so a regime shift after the initial
+    # Z-cross can still veto.
+    if state.sig_state == 1 and abs_z <= confirm_z and state.signal_mfe_points >= _min_fav_pts:
+        alert_fade_opposes_retry = drift_dir != 0 and state.alert_side * drift_dir > 0
+        if not alert_fade_opposes_retry:
+            state.sig_state = 2
+            state.action_signal, state.action_style = determine_confirmed_signal(
+                state.alert_side, state.peak_z, exhaustion_peak,
+            )
+            state.conviction_score = compute_conviction_score(
+                state, instrument_key, state.alert_side, abs(state.peak_z),
+                alert_z, exhaustion_peak, er_threshold, hurst_threshold, drift_dir,
+            )
+            state.setup_label = classify_setup_label(
+                state, state.alert_side, state.peak_z, exhaustion_peak,
+                state.conviction_score, now_ist,
+            )
+
+    # MFE tracking cleanup: once we're back to sig_state=0 (any reset path),
+    # clear the captured entry so the next 0→1 transition starts fresh.
+    if state.sig_state == 0:
+        state.alert_entry_ltp = 0.0
+        state.signal_mfe_points = 0.0
 
     update_thesis_state(state, state.last_tick_ts or time.time())
     if (
@@ -2597,13 +2654,23 @@ from ui.terminal import (  # noqa: F401
 )
 
 
-def signal_outcome(side: int, entry_price: float, forward_price: float) -> tuple[str, float | None]:
-    move_pct = ((forward_price - entry_price) / entry_price) * 100
-    if side > 0: reverted = forward_price < entry_price
-    elif side < 0: reverted = forward_price > entry_price
-    else: return "NO RULE", None
-    if reverted: return "OK REVERTED", abs(move_pct)
-    return "X CONTINUED", None
+def signal_outcome(
+    side: int, entry_price: float, mfe_points: float | None, min_favorable_pts: float,
+) -> tuple[str, float | None]:
+    """Grade a signal by maximum favorable excursion vs a meaningful-move threshold.
+
+    A 2-pt favorable tick at +15m is noise — only count as a win when the move
+    actually crossed `min_favorable_pts` at some point in the window.
+    """
+    if side == 0 or mfe_points is None:
+        return "NO RULE", None
+    if entry_price > 0:
+        favorable_pct = (mfe_points / entry_price) * 100
+    else:
+        favorable_pct = None
+    if mfe_points >= min_favorable_pts:
+        return "OK MOVED", favorable_pct
+    return "X WEAK", favorable_pct
 
 
 def calculate_mae_points(side: int, entry_price: float, window_prices: np.ndarray) -> float | None:
@@ -2612,6 +2679,31 @@ def calculate_mae_points(side: int, entry_price: float, window_prices: np.ndarra
     elif side < 0: adverse_move = entry_price - float(np.min(window_prices))
     else: return None
     return max(0.0, adverse_move)
+
+
+def calculate_mfe_points(side: int, entry_price: float, window_prices: np.ndarray) -> float | None:
+    """Max favorable excursion: best point in the forward window measured in the
+    signal's expected direction. side=+1 (fade short) → favorable = price falls
+    below entry. side=-1 (fade long) → favorable = price rises above entry."""
+    if window_prices.size == 0: return None
+    if side > 0: favorable_move = entry_price - float(np.min(window_prices))
+    elif side < 0: favorable_move = float(np.max(window_prices)) - entry_price
+    else: return None
+    return max(0.0, favorable_move)
+
+
+def resolve_min_favorable_pts(symbol: str, entry_price: float, override: float | None) -> float:
+    """Per-symbol threshold lookup with override priority.
+
+    Priority: explicit CLI override > MIN_FAVORABLE_POINTS_PER_SYMBOL > pct fallback.
+    """
+    if override is not None and override > 0:
+        return float(override)
+    table_value = MIN_FAVORABLE_POINTS_PER_SYMBOL.get(symbol)
+    if table_value is not None:
+        return float(table_value)
+    # Symbol not in table — fall back to a percentage of entry price.
+    return abs(entry_price) * (REVIEW_DEFAULT_MIN_FAVORABLE_PCT / 100.0)
 
 
 def calculate_mae_z(side: int, entry_z: float, window_z_scores: np.ndarray) -> float | None:
@@ -2672,6 +2764,7 @@ def build_confirm_review_events(symbol_frame: pd.DataFrame, min_z: float) -> lis
 
 def build_review_rows(
     frame: pd.DataFrame, min_z: float, window_minutes: int, entry_mode: str = REVIEW_ENTRY_TOUCH,
+    min_favorable_pts_override: float | None = None,
 ) -> list[dict[str, object]]:
     review_rows = []
     window_secs = window_minutes * 60
@@ -2697,11 +2790,16 @@ def build_review_rows(
             window_end_index = int(np.searchsorted(timestamps, target_timestamp, side="right") - 1)
             available_end_index = min(window_end_index, len(symbol_frame) - 1)
             side = int(review_event["side"])
+            entry_ltp = float(review_event["entry_ltp"])
             window_slice = slice(event_index, available_end_index + 1)
             window_prices = prices[window_slice]
             window_z_scores = z_scores[window_slice]
-            mae_points = calculate_mae_points(side, float(review_event["entry_ltp"]), window_prices)
+            mae_points = calculate_mae_points(side, entry_ltp, window_prices)
             mae_z = calculate_mae_z(side, float(review_event["entry_z"]), window_z_scores)
+            mfe_points = calculate_mfe_points(side, entry_ltp, window_prices)
+            min_favorable_pts = resolve_min_favorable_pts(
+                str(symbol), entry_ltp, min_favorable_pts_override,
+            )
 
             if available_end_index < event_index or timestamps[-1] < target_timestamp:
                 forward_price = None
@@ -2709,12 +2807,16 @@ def build_review_rows(
                 favorable_move_pct = None
             else:
                 forward_price = float(prices[available_end_index])
-                result, favorable_move_pct = signal_outcome(side, float(review_event["entry_ltp"]), forward_price)
+                result, favorable_move_pct = signal_outcome(
+                    side, entry_ltp, mfe_points, min_favorable_pts,
+                )
 
             review_rows.append({
                 "timestamp": event_timestamp, "symbol": str(symbol), "signal": SIGNAL_ABBREVIATIONS.get(str(review_event["signal"]), str(review_event["signal"])),
-                "z_score": float(review_event["entry_z"]), "entry_ltp": float(review_event["entry_ltp"]), "forward_ltp": forward_price,
-                "mae_points": mae_points, "mae_z": mae_z, "result": result, "favorable_move_pct": favorable_move_pct,
+                "z_score": float(review_event["entry_z"]), "entry_ltp": entry_ltp, "forward_ltp": forward_price,
+                "mae_points": mae_points, "mae_z": mae_z, "mfe_points": mfe_points,
+                "min_favorable_pts": min_favorable_pts,
+                "result": result, "favorable_move_pct": favorable_move_pct,
             })
 
     review_rows.sort(key=lambda item: (item["timestamp"], item["symbol"]))
@@ -2723,56 +2825,81 @@ def build_review_rows(
 
 def render_review(
     review_day: date, review_rows: list[dict[str, object]], min_z: float, window_minutes: int, entry_mode: str,
+    min_favorable_pts_override: float | None = None,
 ) -> None:
     table = Table(title=f"POST-MARKET REVIEW - {review_day.isoformat()}", header_style="bold cyan", border_style="blue")
     table.add_column("Time", width=8); table.add_column("Symbol", width=12); table.add_column("Signal", width=10)
     table.add_column("Z-Score", justify="right", width=9); table.add_column("LTP @sig", justify="right", width=12)
-    table.add_column(f"LTP +{window_minutes}m", justify="right", width=12); table.add_column("MAE pts", justify="right", width=10)
-    table.add_column("MAE Z", justify="right", width=8); table.add_column("Result", width=14)
+    table.add_column(f"LTP +{window_minutes}m", justify="right", width=12)
+    table.add_column("MFE pts", justify="right", width=10)
+    table.add_column("MAE pts", justify="right", width=10)
+    table.add_column("Min Fav", justify="right", width=8)
+    table.add_column("Result", width=14)
 
     evaluated_rows = [row for row in review_rows if row["forward_ltp"] is not None]
-    reverted_rows = [row for row in evaluated_rows if row["result"] == "OK REVERTED"]
-    continued_rows = [row for row in evaluated_rows if row["result"] == "X CONTINUED"]
+    moved_rows = [row for row in evaluated_rows if row["result"] == "OK MOVED"]
+    weak_rows = [row for row in evaluated_rows if row["result"] == "X WEAK"]
 
-    accuracy = (len(reverted_rows) / len(evaluated_rows) * 100) if evaluated_rows else 0.0
-    mean_reversion = (sum(float(row["favorable_move_pct"]) for row in reverted_rows) / len(reverted_rows) if reverted_rows else 0.0)
+    accuracy = (len(moved_rows) / len(evaluated_rows) * 100) if evaluated_rows else 0.0
+    mean_favorable = (sum(float(row["favorable_move_pct"]) for row in moved_rows if row.get("favorable_move_pct") is not None) / len(moved_rows) if moved_rows else 0.0)
     incomplete = len([row for row in review_rows if row["forward_ltp"] is None])
 
     if not review_rows:
-        table.add_row("-", "-", "-", "-", "-", "-", "-", "-", "No signal events")
+        table.add_row("-", "-", "-", "-", "-", "-", "-", "-", "-", "No signal events")
     else:
         for row in review_rows:
             timestamp = datetime.fromtimestamp(float(row["timestamp"]), IST).strftime("%H:%M")
             forward_ltp = "-" if row["forward_ltp"] is None else f"{float(row['forward_ltp']):,.2f}"
             mae_points = "-" if row["mae_points"] is None else f"{float(row['mae_points']):,.2f}"
-            mae_z = "-" if row["mae_z"] is None else f"{float(row['mae_z']):,.2f}"
-            result_style = "green" if row["result"] == "OK REVERTED" else "red" if row["result"] == "X CONTINUED" else "yellow"
+            mfe_points = "-" if row.get("mfe_points") is None else f"{float(row['mfe_points']):,.2f}"
+            min_fav = "-" if row.get("min_favorable_pts") is None else f"{float(row['min_favorable_pts']):,.2f}"
+            result_style = "green" if row["result"] == "OK MOVED" else "red" if row["result"] == "X WEAK" else "yellow"
 
-            table.add_row(timestamp, str(row["symbol"]), str(row["signal"]), f"{float(row['z_score']):+.2f}", f"{float(row['entry_ltp']):,.2f}", forward_ltp, mae_points, mae_z, Text(str(row["result"]), style=result_style))
+            table.add_row(timestamp, str(row["symbol"]), str(row["signal"]), f"{float(row['z_score']):+.2f}", f"{float(row['entry_ltp']):,.2f}", forward_ltp, mfe_points, mae_points, min_fav, Text(str(row["result"]), style=result_style))
 
     symbol_summary = Table(title="Per-Symbol Summary", header_style="bold cyan", border_style="green")
     symbol_summary.add_column("Symbol", width=12); symbol_summary.add_column("Signals", justify="right", width=8)
-    symbol_summary.add_column("Accuracy", justify="right", width=10); symbol_summary.add_column("Avg MAE", justify="right", width=10)
+    symbol_summary.add_column("Accuracy", justify="right", width=10)
+    symbol_summary.add_column("Avg MFE", justify="right", width=10)
+    symbol_summary.add_column("Avg MAE", justify="right", width=10)
 
     if evaluated_rows:
-        summary_frame = pd.DataFrame({"symbol": [str(row["symbol"]) for row in evaluated_rows], "result": [str(row["result"]) for row in evaluated_rows], "mae_points": [np.nan if row["mae_points"] is None else float(row["mae_points"]) for row in evaluated_rows]})
-        grouped = summary_frame.groupby("symbol", sort=False).agg(signals=("symbol", "size"), reverted=("result", lambda series: int((series == "OK REVERTED").sum())), avg_mae=("mae_points", "mean")).reset_index()
+        summary_frame = pd.DataFrame({
+            "symbol": [str(row["symbol"]) for row in evaluated_rows],
+            "result": [str(row["result"]) for row in evaluated_rows],
+            "mae_points": [np.nan if row["mae_points"] is None else float(row["mae_points"]) for row in evaluated_rows],
+            "mfe_points": [np.nan if row.get("mfe_points") is None else float(row["mfe_points"]) for row in evaluated_rows],
+        })
+        grouped = summary_frame.groupby("symbol", sort=False).agg(
+            signals=("symbol", "size"),
+            moved=("result", lambda series: int((series == "OK MOVED").sum())),
+            avg_mfe=("mfe_points", "mean"),
+            avg_mae=("mae_points", "mean"),
+        ).reset_index()
         for row in grouped.itertuples(index=False):
-            accuracy_text = f"{(row.reverted / row.signals * 100):.1f}%"
-            symbol_summary.add_row(str(row.symbol), f"{int(row.signals)}", accuracy_text, f"{float(row.avg_mae):,.2f}")
+            accuracy_text = f"{(row.moved / row.signals * 100):.1f}%"
+            symbol_summary.add_row(str(row.symbol), f"{int(row.signals)}", accuracy_text, f"{float(row.avg_mfe):,.2f}", f"{float(row.avg_mae):,.2f}")
     else:
-        symbol_summary.add_row("-", "0", "0.0%", "-")
+        symbol_summary.add_row("-", "0", "0.0%", "-", "-")
 
+    if min_favorable_pts_override is not None:
+        threshold_label = f"override {min_favorable_pts_override:.2f} pts"
+    else:
+        threshold_label = "per-symbol (see Min Fav col)"
     summary = (
-        f"Review start: 09:45 IST  |  Filtering signals with |Z| >= {min_z:.1f}  |  Window: {window_minutes}m  |  Entry: {entry_mode}  |  "
-        f"ACCURACY: {accuracy:.1f}%  |  Mean reversion avg: +{mean_reversion:.2f}%  |  False signals: {len(continued_rows)}  |  Incomplete: {incomplete}"
+        f"Review start: 09:45 IST  |  |Z| >= {min_z:.1f}  |  Window: {window_minutes}m  |  Entry: {entry_mode}  |  "
+        f"Min favorable: {threshold_label}  |  "
+        f"ACCURACY: {accuracy:.1f}%  |  Avg favorable: +{mean_favorable:.2f}%  |  Weak/noise: {len(weak_rows)}  |  Incomplete: {incomplete}"
     )
     console.print(table)
     console.print(symbol_summary)
     console.print(Panel(summary, title="Review Summary", border_style="green"))
 
 
-def run_review(review_day: date, min_z: float, window_minutes: int, entry_mode: str) -> int:
+def run_review(
+    review_day: date, min_z: float, window_minutes: int, entry_mode: str,
+    min_favorable_pts: float | None = None,
+) -> int:
     if window_minutes <= 0: console.print("[bold red]Review window must be at least 1 minute.[/bold red]"); return 1
     if entry_mode not in REVIEW_ENTRY_MODES: console.print(f"[bold red]Unknown review entry mode: {entry_mode}[/bold red]"); return 1
 
@@ -2810,10 +2937,16 @@ def run_review(review_day: date, min_z: float, window_minutes: int, entry_mode: 
     frame = frame.dropna(subset=["timestamp", "ltp", "z_score"])
     frame = frame.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
 
-    review_rows = build_review_rows(frame, min_z, window_minutes, entry_mode)
+    review_rows = build_review_rows(
+        frame, min_z, window_minutes, entry_mode,
+        min_favorable_pts_override=min_favorable_pts,
+    )
     if not review_rows: console.print("[yellow]No signals found after the 09:45 AM filter window.[/yellow]"); return 0
 
-    render_review(review_day, review_rows, min_z, window_minutes, entry_mode)
+    render_review(
+        review_day, review_rows, min_z, window_minutes, entry_mode,
+        min_favorable_pts_override=min_favorable_pts,
+    )
     return 0
 
 
@@ -3709,6 +3842,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-z", type=float, default=2.0, help="Minimum abs z-score to grade.")
     parser.add_argument("--window", type=int, default=REVIEW_DEFAULT_WINDOW_MINUTES, help="Forward review window (min).")
     parser.add_argument("--entry-mode", choices=REVIEW_ENTRY_MODES, default=REVIEW_ENTRY_TOUCH, help="Review logic.")
+    parser.add_argument("--min-favorable-pts", type=float, default=None, help="Override per-symbol favorable-move threshold (points). If unset, MIN_FAVORABLE_POINTS_PER_SYMBOL from config is used.")
     parser.add_argument("--replay", metavar="FILE", help="Replay offline CSV backtest.")
     parser.add_argument("--backtest", action="store_true", help="Fetch Upstox 1-min candles.")
     parser.add_argument("--preflight", action="store_true", help="Run pre-market diagnostics.")
@@ -3751,7 +3885,7 @@ def cli() -> int:
 
     if args.review is not None:
         review_day = datetime.now(IST).date() if args.review == "today" else parse_review_date(args.review)
-        return run_review(review_day, args.min_z, args.window, args.entry_mode)
+        return run_review(review_day, args.min_z, args.window, args.entry_mode, args.min_favorable_pts)
 
     if args.replay is not None:
         asyncio.run(run_replay_mode(args.replay))

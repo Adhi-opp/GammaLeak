@@ -333,6 +333,26 @@ SIGNAL_ABBREVIATIONS = {
 REVIEW_ENTRY_TOUCH = "touch"
 REVIEW_ENTRY_CONFIRM = "confirm"
 REVIEW_ENTRY_MODES = (REVIEW_ENTRY_TOUCH, REVIEW_ENTRY_CONFIRM)
+
+# Minimum favorable excursion (in instrument points) before a signal counts
+# as a success. Below this, the move is treated as noise / liquidity sweep
+# regardless of direction. Tuned per instrument's typical noise floor.
+# VIX uses an effectively unreachable threshold to keep it display-only.
+MIN_FAVORABLE_POINTS_PER_SYMBOL: dict[str, float] = {
+    "NIFTY":      15.0,
+    "NIFTY_FUT":  15.0,
+    "BANKNIFTY":  40.0,
+    "BN_FUT":     40.0,
+    "RELIANCE":    5.0,
+    "HDFCBANK":    8.0,
+    "SBIN":        3.0,
+    "ICICIBANK":   5.0,
+    "USDINR":      0.05,
+    "CRUDEOIL":   30.0,
+    "VIX":       999.0,
+}
+# Fallback for any symbol not in the table above (~0.05% of entry price).
+REVIEW_DEFAULT_MIN_FAVORABLE_PCT = 0.05
 UPSTOX_CURRENCY_UNDERLYINGS = ("USDINR", "EURINR", "GBPINR", "JPYINR")
 
 
