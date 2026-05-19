@@ -24,6 +24,7 @@ from core.state import (
     oi_levels_state,
     oi_flow_timeline,
 )
+from gammaleak_runtime.io_logs import append_oi_state_row
 
 
 _oi_flow_last_sample_ts: float = 0.0
@@ -68,6 +69,22 @@ def record_oi_flow_sample(nifty_state: SymbolState, timestamp: float) -> None:
         top_pe_strike,
         fut_ltp,
     ))
+    # Mirror to logs/<date>_oi_state.csv on the same 5s cadence so the chart's
+    # walls + delta velocities are retroactively inspectable. try/except keeps
+    # any disk error from ever propagating into the live engine path.
+    try:
+        append_oi_state_row(
+            timestamp=timestamp,
+            spot=nifty_state.ltp, fut=fut_ltp,
+            top_ce_strike=top_ce_strike, top_pe_strike=top_pe_strike,
+            max_pain=max_pain_strike,
+            ce_delta=nifty_state.oi_flow_ce_delta,
+            pe_delta=nifty_state.oi_flow_pe_delta,
+            oi_flow_label=nifty_state.oi_flow_label or "",
+            oi_flow_ce_pe=nifty_state.oi_flow_ce_pe or "",
+        )
+    except Exception:
+        pass
 
 
 def classify_oi_flow(nifty_state: SymbolState) -> None:

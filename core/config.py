@@ -63,6 +63,16 @@ EVENT_LOG_COLUMNS = (
     "timestamp", "timestamp_ist", "symbol", "event_type", "side",
     "z_score", "ltp", "regime", "setup_label", "conviction",
 )
+# Per-sample snapshot of the OI Flow Anchored Velocity Chart's underlying
+# state. Persisting these lets us retroactively verify "did spot bounce off
+# the PE wall?" or "did a PE-delta spike lead a price reversal?" — the chart
+# itself is in-memory only, so without this file the answer is unknowable.
+# Same 5s cadence as the in-memory ring buffer.
+OI_STATE_LOG_COLUMNS = (
+    "timestamp", "timestamp_ist", "spot", "fut",
+    "top_ce_strike", "top_pe_strike", "max_pain",
+    "ce_delta", "pe_delta", "oi_flow_label", "oi_flow_ce_pe",
+)
 LOG_BATCH_SIZE = 5  # Flush every 5 ticks (~100-500ms) to prevent data loss
 LOG_FLUSH_INTERVAL_SECS = 1.0
 

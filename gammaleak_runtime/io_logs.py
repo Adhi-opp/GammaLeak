@@ -21,7 +21,10 @@ from pathlib import Path
 # when the engine runs as `__main__` (Python treats the file as two modules:
 # `__main__` and `GammaLeak`, so re-importing it re-runs top-level
 # code mid-load).
-from core.config import EVENT_LOG_COLUMNS, IST, LOG_BATCH_SIZE, LOG_COLUMNS, LOG_DIR, LOG_FLUSH_INTERVAL_SECS
+from core.config import (
+    EVENT_LOG_COLUMNS, IST, LOG_BATCH_SIZE, LOG_COLUMNS, LOG_DIR,
+    LOG_FLUSH_INTERVAL_SECS, OI_STATE_LOG_COLUMNS,
+)
 from core.state import console
 
 
@@ -77,6 +80,40 @@ def append_event_row(
         writer = csv.writer(handle)
         if write_header:
             writer.writerow(EVENT_LOG_COLUMNS)
+        writer.writerow(row)
+
+
+def get_oi_state_log_path(trading_day: date | None = None) -> Path:
+    active_day = trading_day or datetime.now(IST).date()
+    return LOG_DIR / f"{active_day.isoformat()}_oi_state.csv"
+
+
+def append_oi_state_row(
+    timestamp: float, spot: float, fut: float,
+    top_ce_strike: float, top_pe_strike: float, max_pain: float,
+    ce_delta: float, pe_delta: float,
+    oi_flow_label: str = "", oi_flow_ce_pe: str = "",
+) -> None:
+    """Append one OI Flow chart snapshot to logs/YYYY-MM-DD_oi_state.csv.
+
+    Mirrors what `oi_flow_timeline.append(...)` writes to the in-memory ring
+    buffer. Sample cadence is whatever `record_oi_flow_sample` is gated to
+    (currently OI_FLOW_TIMELINE_SAMPLE_SECS = 5s), so file growth is roughly
+    one row every 5 seconds (~4,700 rows per full session — small).
+    """
+    path = get_oi_state_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists()
+    ts_ist = datetime.fromtimestamp(timestamp, IST).strftime("%Y-%m-%d %H:%M:%S")
+    row = (
+        f"{timestamp:.3f}", ts_ist, f"{spot:.4f}", f"{fut:.4f}",
+        f"{top_ce_strike:.0f}", f"{top_pe_strike:.0f}", f"{max_pain:.0f}",
+        f"{ce_delta:.0f}", f"{pe_delta:.0f}", oi_flow_label, oi_flow_ce_pe,
+    )
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        if write_header:
+            writer.writerow(OI_STATE_LOG_COLUMNS)
         writer.writerow(row)
 
 
