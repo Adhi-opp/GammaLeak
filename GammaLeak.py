@@ -1562,8 +1562,15 @@ def update_signal_engine(
         regime_tags.append("ER TREND")
     if hurst_trending:
         regime_tags.append("HURST TREND")
-    # Only suppress fade signals when BOTH indicators agree on trending
-    regime_trending = er_trending and hurst_trending
+    # Suppress fade signals when EITHER indicator flags trending.
+    # Previously required AND, which let through fade-shorts on days where
+    # Hurst flagged a clear trend but ER hadn't yet crossed its threshold
+    # (chop within an uptrend). Empirically that produced losing fade-shorts
+    # during sustained moves -- 2026-05-20 morning rally was the case study.
+    # The downstream trend-follower (~line 1610) still requires BOTH ER >= 0.60
+    # AND Hurst >= 0.55 to actually FIRE a momentum signal, so this only
+    # widens the silence-zone, not the signal universe.
+    regime_trending = er_trending or hurst_trending
     if usdinr_z_multiplier(instrument_key, state.ltp) != 1.0:
         regime_tags.append("RBI ZONE")
 
