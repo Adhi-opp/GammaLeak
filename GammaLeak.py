@@ -2081,6 +2081,39 @@ def record_tick(
         state.tsq = tsq
         denom = tbq + tsq
         state.book_imbalance = (tbq - tsq) / denom if denom > 0 else 0.0
+        # Phase 1 OFI — push the snapshot into the ring and compute the
+        # smoothed delta (oldest→newest), then classify the 4-quadrant
+        # absorption state by cross-referencing with CVD direction.
+        # Observational only; no engine action triggers from this yet.
+        state.tbq_history.append(tbq)
+        state.tsq_history.append(tsq)
+        if len(state.tbq_history) >= 2:
+            d_tbq = state.tbq_history[-1] - state.tbq_history[0]
+            d_tsq = state.tsq_history[-1] - state.tsq_history[0]
+            state.delta_ofi_smoothed = d_tbq - d_tsq
+            # OFI structural threshold (per-tick noise floor) and CVD-direction
+            # threshold to call a "heavy" tape. Both tunable; start
+            # conservative — we want absorption to be RARE and meaningful.
+            _OFI_STRUCT = 25000.0
+            _CVD_DIR = 5000
+            if abs(state.delta_ofi_smoothed) >= _OFI_STRUCT and abs(state.cvd) >= _CVD_DIR:
+                cvd_pos = state.cvd > 0
+                ofi_pos = state.delta_ofi_smoothed > 0
+                if not cvd_pos and ofi_pos:
+                    # Tape selling, but limit-bid pile growing or asks pulling
+                    # → passive demand absorbing aggressive supply.
+                    state.absorption_label = "BULL_ABSORB"
+                elif cvd_pos and not ofi_pos:
+                    # Tape buying, but limit-ask pile growing or bids pulling
+                    # → passive supply capping aggressive demand.
+                    state.absorption_label = "BEAR_ABSORB"
+                elif cvd_pos and ofi_pos:
+                    # Tape buying AND limit-asks pulling → liquidity void up.
+                    state.absorption_label = "BULL_VOID"
+                else:
+                    state.absorption_label = "BEAR_VOID"
+            else:
+                state.absorption_label = ""
 
     # Aggressor classification — runs early so CVD is ready by the time
     # divergence detection consumes it later in this tick.

@@ -152,6 +152,17 @@ class SymbolState:
     tsq: float = 0.0                           # total sell quantity in the book
     book_imbalance: float = 0.0                # (tbq - tsq) / (tbq + tsq); range [-1, +1]
 
+    # Phase 1 OFI — ring buffers of the last N tbq/tsq snapshots so we can
+    # compute the rolling change (ΔTBQ - ΔTSQ) as a leading-indicator on
+    # passive liquidity intent. delta_ofi_smoothed and absorption_label are
+    # observational fields (no engine action yet) surfaced in the card math
+    # dropdown for human read. Promoted to a conviction-bumper only after
+    # Phase 2 backtest validates correlation with MFE-passing CONFIRMs.
+    tbq_history: deque = field(default_factory=lambda: deque(maxlen=10))
+    tsq_history: deque = field(default_factory=lambda: deque(maxlen=10))
+    delta_ofi_smoothed: float = 0.0            # (last_tbq-first_tbq) - (last_tsq-first_tsq)
+    absorption_label: str = ""                 # BULL_ABSORB / BEAR_ABSORB / BULL_VOID / BEAR_VOID / ""
+
     # Aggressor-classified flow (Lee-Ready tick rule + midpoint refinement)
     cvd: int = 0                               # cumulative volume delta = Σ(buy_vol - sell_vol) since session open
     _prev_ltp_for_aggressor: float = 0.0

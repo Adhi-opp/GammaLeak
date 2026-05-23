@@ -83,6 +83,9 @@ def serialize_symbol(key: str) -> dict:
         "tbq": round(s.tbq, 0),
         "tsq": round(s.tsq, 0),
         "book_imbalance": round(s.book_imbalance, 3),
+        # Phase 1 OFI — observational; rendered in the card math dropdown.
+        "delta_ofi_smoothed": round(s.delta_ofi_smoothed, 0),
+        "absorption_label": s.absorption_label,
         # Pre-open gap context
         "prior_close": round(s.prior_close, 2) if s.prior_close > 0 else None,
         "gap_pct": round(s.gap_pct, 3) if s.gap_bucket else None,

@@ -1274,6 +1274,8 @@ function renderInstruments(data) {
         ${(s.book_imbalance !== undefined && Math.abs(s.book_imbalance) >= 0.05) ? `<div class="inst-metric"><span class="k">Book</span><span class="v num ${s.book_imbalance > 0 ? 'up' : 'down'}">${s.book_imbalance > 0 ? '+' : ''}${s.book_imbalance.toFixed(2)}</span></div>` : ''}
         ${(s.gap_bucket) ? `<div class="inst-metric"><span class="k">Gap</span><span class="v num ${s.gap_bucket.includes('UP') ? 'up' : s.gap_bucket.includes('DN') ? 'down' : 'neutral'}">${s.gap_pct > 0 ? '+' : ''}${(s.gap_pct ?? 0).toFixed(2)}%</span></div>` : ''}
         ${(s.cvd !== undefined && s.cvd !== 0) ? `<div class="inst-metric"><span class="k">CVD</span><span class="v num ${s.cvd > 0 ? 'up' : 'down'}">${s.cvd > 0 ? '+' : ''}${s.cvd.toLocaleString()}</span></div>` : ''}
+        ${(s.delta_ofi_smoothed !== undefined && Math.abs(s.delta_ofi_smoothed) >= 1000) ? `<div class="inst-metric"><span class="k">ΔOFI</span><span class="v num ${s.delta_ofi_smoothed > 0 ? 'up' : 'down'}">${s.delta_ofi_smoothed > 0 ? '+' : ''}${(s.delta_ofi_smoothed/1000).toFixed(1)}K</span></div>` : ''}
+        ${(s.absorption_label) ? `<div class="inst-metric"><span class="k">Absorb</span><span class="v text-xs ${s.absorption_label.startsWith('BULL') ? 'up' : 'down'}">${s.absorption_label}</span></div>` : ''}
       </div>
       ${zBarHTML(s.z_score)}
       ${verdictRowHTML}
