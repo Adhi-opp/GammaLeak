@@ -1541,21 +1541,32 @@ function setupTabs() {
 }
 
 /* ================================================================
-   OI FLOW — ANCHORED VELOCITY CHART (handwritten dual-axis SVG)
+   OI FLOW — ANCHORED VELOCITY CHART (handwritten two-pane SVG)
 
-   Primary (left) axis: NIFTY spot line + dashed reference lines for
+   Top pane (65%): NIFTY spot + NIFTY_FUT overlay + dashed anchors
      - Highest_PE_OI_Strike  (Dynamic Floor / Demand)   - dashed green
      - Highest_CE_OI_Strike  (Dynamic Ceiling / Supply) - dashed red
-     - Max Pain               (Magnet)                   - dashed gray
-   Secondary (right) axis: continuous Flow Velocity lines
-     - ce_delta (Red)  — call writers inflow (+) / unwind (-)
+     - Max Pain              (Magnet)                   - dashed gray
+   Bottom pane (35%): Flow Velocity around dedicated zero line
+     - ce_delta (Red)   — call writers inflow (+) / unwind (-)
      - pe_delta (Green) — put writers inflow (+) / unwind (-)
-     - Hard zero line so divergences read instantly.
 
-   Confluence: a sweep of price into the dashed green floor that
-   coincides with the green pe_delta line spiking above zero is the
-   Liquidity Sweep signature — visible in one glance.
+   Confluence (now cross-pane): a sweep of spot toward the dashed green
+   PE WALL in the top pane co-occurring with green pe_delta spiking
+   above the bottom-pane zero line is the Liquidity Sweep signature —
+   read top-then-bottom rather than in a single glance.
+
+   Y-axis is clamped to spot/fut range × 1.5 so deep-OTM walls never
+   pancake the price line. Walls beyond the clamped view show as a
+   pinned distance badge (↑/↓ + signed offset from spot) at the
+   appropriate pane edge instead of a misleading flat line.
    ================================================================ */
+// Render-throttle cache: web_server broadcasts at 4Hz but record_oi_flow_sample
+// only emits a new row every OI_FLOW_TIMELINE_SAMPLE_SECS (5s). Skip the SVG
+// rebuild if neither the latest sample timestamp nor the container width have
+// changed — saves ~19 wasted rebuilds per real update.
+let _oiTlLastTs = 0;
+let _oiTlLastW = 0;
 function renderOIFlowTimeline(data) {
   const el = document.getElementById('oi-flow-tl-body');
   if (!el) return;
@@ -1565,112 +1576,154 @@ function renderOIFlowTimeline(data) {
     return;
   }
   const samples = tl.samples;
+  const latest = samples[samples.length - 1];
+
+  // ---------- Geometry & two-pane split ----------
+  const W = el.clientWidth || 1200;
+  const H = 480;
+
+  // Throttle: bail unless data ticked OR width changed (resize). The svg-exists
+  // probe guards against a re-render after a tab swap that wiped the DOM.
+  if (latest.ts === _oiTlLastTs && W === _oiTlLastW && el.querySelector('svg')) {
+    return;
+  }
+  _oiTlLastTs = latest.ts;
+  _oiTlLastW = W;
+
   const tsNow = tl.ts_now;
   const windowSecs = tl.window_secs || 1800;
   const tsMin = tsNow - windowSecs;
   const tsMax = tsNow;
 
   // Latest anchors — these are the dashed horizontal reference lines.
-  const latest = samples[samples.length - 1];
   const anchorPE = latest.top_pe_strike || 0;  // Dynamic floor
   const anchorCE = latest.top_ce_strike || 0;  // Dynamic ceiling
   const anchorMP = latest.max_pain || 0;        // Magnet
 
-  // ---------- Geometry ----------
-  const W = el.clientWidth || 1200;
-  const H = 280;
-  const M = { top: 14, right: 92, bottom: 26, left: 64 };
+  const M = { top: 16, right: 92, bottom: 26, left: 64 };
   const innerW = W - M.left - M.right;
   const innerH = H - M.top - M.bottom;
   const innerLeft = M.left;
   const innerRight = M.left + innerW;
-  const innerTop = M.top;
-  const innerBottom = M.top + innerH;
+
+  // Stacked panes: price on top (65%), delta on bottom (35%), gap between.
+  const paneGap = 20;
+  const topPaneH = (innerH - paneGap) * 0.65;
+  const botPaneH = (innerH - paneGap) * 0.35;
+  const topTop = M.top;
+  const topBot = topTop + topPaneH;
+  const botTop = topBot + paneGap;
+  const botBot = botTop + botPaneH;
 
   // ---------- Scales ----------
-  // Primary (price) — include spot range, NIFTY_FUT range, AND active anchors
-  // so the dashed lines and the futures overlay all land inside the chart.
+  // Primary (price) — clamped to spot+fut range (NOT including anchors).
+  // Deep-OTM walls used to pancake intraday volatility by stretching the
+  // Y-range; we now visualize spot's actual range and shunt off-canvas
+  // anchors to a distance-badge at the pane edge.
   const spotVals = samples.map(s => s.spot);
   const futVals = samples.map(s => s.fut || 0).filter(v => v > 0);
-  const anchorVals = [anchorPE, anchorCE, anchorMP].filter(v => v > 0);
-  const allPrimary = spotVals.concat(futVals).concat(anchorVals);
-  const pMin = Math.min(...allPrimary);
-  const pMax = Math.max(...allPrimary);
-  const pPad = Math.max(2, (pMax - pMin) * 0.10);
-  const pLo = pMin - pPad;
-  const pHi = pMax + pPad;
-  const yP = (v) => innerBottom - ((v - pLo) / (pHi - pLo)) * innerH;
+  const coreVals = spotVals.concat(futVals);
+  const coreMin = Math.min(...coreVals);
+  const coreMax = Math.max(...coreVals);
+  // Min visual range 80pts protects against an opening flat where coreMax-coreMin~0
+  // and the chart would zoom into single-point noise.
+  const visualRange = Math.max(80, (coreMax - coreMin) * 1.5);
+  const pMid = (coreMax + coreMin) / 2;
+  const pLo = pMid - (visualRange / 2);
+  const pHi = pMid + (visualRange / 2);
+  const yP = (v) => topBot - ((v - pLo) / (pHi - pLo)) * topPaneH;
 
   // Secondary (delta) — symmetric around zero so the zero line sits visually
-  // in the middle, making sign changes pop.
+  // in the middle of the bottom pane, making sign changes pop. Floor of 30K
+  // prevents tiny early-session deltas from auto-zooming into noise.
   const ceDs = samples.map(s => s.ce_delta);
   const peDs = samples.map(s => s.pe_delta);
   const allDeltas = ceDs.concat(peDs);
-  const dAbsMax = Math.max(1, ...allDeltas.map(d => Math.abs(d)));
+  const dAbsMax = Math.max(30000, ...allDeltas.map(d => Math.abs(d)));
   const dLo = -dAbsMax * 1.1;
   const dHi =  dAbsMax * 1.1;
-  const yD = (v) => innerBottom - ((v - dLo) / (dHi - dLo)) * innerH;
+  const yD = (v) => botBot - ((v - dLo) / (dHi - dLo)) * botPaneH;
 
-  // Time axis (shared)
+  // Compact K-format for delta axis labels and right-edge value tags.
+  const fmtK = (v) => {
+    const sign = v >= 0 ? '+' : '-';
+    const abs = Math.abs(v);
+    if (abs >= 10000) return sign + Math.round(abs / 1000) + 'K';
+    if (abs >= 1000)  return sign + (abs / 1000).toFixed(1) + 'K';
+    return sign + Math.round(abs);
+  };
+
+  // Time axis (shared X across both panes)
   const xOf = (ts) => innerLeft + Math.max(0, Math.min(innerW, ((ts - tsMin) / windowSecs) * innerW));
 
   // ---------- Build SVG ----------
   let svg = `<svg class="oiflow-tl-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" height="${H}">`;
 
-  // Background gridlines (5 horizontal, primary-axis-driven)
+  // Top pane gridlines + left price labels
   for (let i = 0; i <= 4; i++) {
-    const y = innerTop + (innerH * i / 4);
+    const y = topTop + (topPaneH * i / 4);
     const pv = pHi - (pHi - pLo) * (i / 4);
-    const dv = dHi - (dHi - dLo) * (i / 4);
     svg += `<line class="oiflow-tl-gridline" x1="${innerLeft}" y1="${y.toFixed(1)}" x2="${innerRight}" y2="${y.toFixed(1)}" />`;
-    // Left price labels
     svg += `<text class="oiflow-tl-axis-label" x="${innerLeft - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end">${pv.toFixed(0)}</text>`;
-    // Right delta labels
-    const dStr = dv >= 0 ? '+' + Math.round(dv).toLocaleString('en-IN') : Math.round(dv).toLocaleString('en-IN');
-    svg += `<text class="oiflow-tl-axis-label" x="${innerRight + 6}" y="${(y + 3).toFixed(1)}" text-anchor="start" style="fill:#888">${dStr}</text>`;
   }
 
-  // X-axis time ticks every 5 min
+  // Bottom pane gridlines + right delta labels (3 lines: top/zero/bottom)
+  for (let i = 0; i <= 2; i++) {
+    const y = botTop + (botPaneH * i / 2);
+    const dv = dHi - (dHi - dLo) * (i / 2);
+    svg += `<line class="oiflow-tl-gridline" x1="${innerLeft}" y1="${y.toFixed(1)}" x2="${innerRight}" y2="${y.toFixed(1)}" opacity="0.5" />`;
+    svg += `<text class="oiflow-tl-axis-label" x="${innerRight + 6}" y="${(y + 3).toFixed(1)}" text-anchor="start" style="fill:#888">${fmtK(dv)}</text>`;
+  }
+
+  // X-axis time ticks every 5 min, anchored to the bottom pane's lower edge
   const firstTick = Math.ceil(tsMin / 300) * 300;
   for (let t = firstTick; t <= tsMax; t += 300) {
     const x = xOf(t);
     const dt = new Date(t * 1000);
     const lbl = String(dt.getHours()).padStart(2, '0') + ':' + String(dt.getMinutes()).padStart(2, '0');
-    svg += `<line class="oiflow-tl-axis-tick" x1="${x.toFixed(1)}" y1="${innerBottom}" x2="${x.toFixed(1)}" y2="${innerBottom + 4}" />`;
-    svg += `<text class="oiflow-tl-axis-label" x="${x.toFixed(1)}" y="${innerBottom + 16}" text-anchor="middle">${lbl}</text>`;
+    svg += `<line class="oiflow-tl-axis-tick" x1="${x.toFixed(1)}" y1="${botBot}" x2="${x.toFixed(1)}" y2="${botBot + 4}" />`;
+    svg += `<text class="oiflow-tl-axis-label" x="${x.toFixed(1)}" y="${(botBot + 16).toFixed(1)}" text-anchor="middle">${lbl}</text>`;
   }
 
-  // Axis titles (left/right)
-  svg += `<text class="oiflow-tl-axis-title" x="${innerLeft - 6}" y="${(innerTop - 4).toFixed(1)}" text-anchor="end">PRICE</text>`;
-  svg += `<text class="oiflow-tl-axis-title" x="${innerRight + 6}" y="${(innerTop - 4).toFixed(1)}" text-anchor="start" style="fill:#888">Δ OI</text>`;
+  // Axis titles — PRICE above top pane, Δ OI above bottom pane
+  svg += `<text class="oiflow-tl-axis-title" x="${innerLeft - 6}" y="${(topTop - 4).toFixed(1)}" text-anchor="end">PRICE</text>`;
+  svg += `<text class="oiflow-tl-axis-title" x="${innerRight + 6}" y="${(botTop - 4).toFixed(1)}" text-anchor="start" style="fill:#888">Δ OI</text>`;
 
-  // ---------- Dashed anchor lines (primary axis) ----------
-  // Drawn first so they sit BEHIND the spot line.
+  // ---------- TOP PANE: anchors → spot → fut ----------
+  // Anchors drawn first so they sit BEHIND the spot line.
+  // In-range anchors render as a full dashed horizontal. Off-range anchors
+  // (beyond the Y-clamp window) render as a pinned distance badge at the
+  // pane edge with a direction arrow + signed offset from latest spot.
   const drawAnchor = (strike, color, label) => {
-    if (!strike || strike < pLo || strike > pHi) return '';
-    const y = yP(strike).toFixed(1);
+    if (!strike) return '';
+    if (strike >= pLo && strike <= pHi) {
+      const y = yP(strike).toFixed(1);
+      return `
+        <line x1="${innerLeft}" y1="${y}" x2="${innerRight}" y2="${y}" stroke="${color}" stroke-width="1" stroke-dasharray="6 4" opacity="0.55" />
+        <text x="${innerRight - 4}" y="${(parseFloat(y) - 4).toFixed(1)}" text-anchor="end" style="font-size:9px;fill:${color};opacity:0.85;letter-spacing:0.4px">${label} ${strike.toLocaleString('en-IN')}</text>
+      `;
+    }
+    // Off-canvas: pin at top or bottom edge with arrow + signed offset from spot.
+    const offset = strike - latest.spot;
+    const sign = offset >= 0 ? '+' : '−';
+    const arrow = strike > pHi ? '↑' : '↓';
+    const badgeY = (strike > pHi ? topTop + 10 : topBot - 4).toFixed(1);
     return `
-      <line x1="${innerLeft}" y1="${y}" x2="${innerRight}" y2="${y}" stroke="${color}" stroke-width="1" stroke-dasharray="6 4" opacity="0.55" />
-      <text x="${innerRight - 4}" y="${(parseFloat(y) - 4).toFixed(1)}" text-anchor="end" style="font-size:9px;fill:${color};opacity:0.85;letter-spacing:0.4px">${label} ${strike.toLocaleString('en-IN')}</text>
+      <text x="${innerRight - 4}" y="${badgeY}" text-anchor="end" style="font-size:9px;fill:${color};opacity:0.75;letter-spacing:0.4px">${arrow} ${label} ${strike.toLocaleString('en-IN')} (${sign}${Math.abs(Math.round(offset))})</text>
     `;
   };
   svg += drawAnchor(anchorPE, '#22c55e', 'PE WALL');
   svg += drawAnchor(anchorCE, '#ef4444', 'CE WALL');
   svg += drawAnchor(anchorMP, '#9ca3af', 'MAX PAIN');
 
-  // ---------- Zero line on secondary axis ----------
-  const yZero = yD(0);
-  svg += `<line x1="${innerLeft}" y1="${yZero.toFixed(1)}" x2="${innerRight}" y2="${yZero.toFixed(1)}" stroke="#ffffff" stroke-width="0.5" opacity="0.25" />`;
-
-  // ---------- Spot price polyline (primary) ----------
+  // Spot price polyline
   let spotPath = '';
   samples.forEach((s, idx) => {
     spotPath += (idx === 0 ? 'M' : 'L') + xOf(s.ts).toFixed(1) + ',' + yP(s.spot).toFixed(1) + ' ';
   });
   svg += `<path d="${spotPath.trim()}" fill="none" stroke="#22d3ee" stroke-width="1.6" />`;
 
-  // ---------- NIFTY_FUT overlay (primary) ----------
-  // Dotted yellow line on top of spot — basis divergence shows up as the
+  // NIFTY_FUT overlay on top of spot — basis divergence shows up as the
   // gap between the two lines, and FUT slicing below the dashed PE WALL
   // before spot does is the leading-indicator pattern for a breakdown.
   // Breaks the path on samples where fut is missing (off-hours / pre-resolve)
@@ -1689,7 +1742,22 @@ function renderOIFlowTimeline(data) {
     svg += `<path d="${futPath.trim()}" fill="none" stroke="#facc15" stroke-width="1.2" stroke-dasharray="3 3" opacity="0.85" />`;
   }
 
-  // ---------- Flow Velocity lines (secondary) ----------
+  // ---------- BOTTOM PANE: area fills → Δ lines → zero line ----------
+  // Area fills under each Δ line (down to zero) give a peripheral-vision read
+  // of the dominant flow regime: when CE area dwarfs PE area the pane is
+  // visibly red, and vice-versa, without having to trace the line crossings.
+  const yZero = yD(0);
+  const buildDeltaArea = (key, colorStr) => {
+    let p = `M${xOf(samples[0].ts).toFixed(1)},${yZero.toFixed(1)} `;
+    samples.forEach(s => {
+      p += `L${xOf(s.ts).toFixed(1)},${yD(s[key]).toFixed(1)} `;
+    });
+    p += `L${xOf(samples[samples.length - 1].ts).toFixed(1)},${yZero.toFixed(1)} Z`;
+    return `<path d="${p}" fill="${colorStr}" opacity="0.15" />`;
+  };
+  svg += buildDeltaArea('ce_delta', '#ef4444');
+  svg += buildDeltaArea('pe_delta', '#22c55e');
+
   const buildDeltaPath = (key) => {
     let p = '';
     samples.forEach((s, idx) => {
@@ -1697,21 +1765,33 @@ function renderOIFlowTimeline(data) {
     });
     return p.trim();
   };
-  svg += `<path d="${buildDeltaPath('ce_delta')}" fill="none" stroke="#ef4444" stroke-width="1.2" opacity="0.95" />`;
-  svg += `<path d="${buildDeltaPath('pe_delta')}" fill="none" stroke="#22c55e" stroke-width="1.2" opacity="0.95" />`;
+  svg += `<path d="${buildDeltaPath('ce_delta')}" fill="none" stroke="#ef4444" stroke-width="1.4" opacity="0.95" />`;
+  svg += `<path d="${buildDeltaPath('pe_delta')}" fill="none" stroke="#22c55e" stroke-width="1.4" opacity="0.95" />`;
 
-  // ---------- "Now" marker — dashed vertical at right edge ----------
+  // Zero line on top of the area fills so the sign reference stays legible.
+  svg += `<line x1="${innerLeft}" y1="${yZero.toFixed(1)}" x2="${innerRight}" y2="${yZero.toFixed(1)}" stroke="#ffffff" stroke-width="0.8" stroke-dasharray="2 2" opacity="0.55" />`;
+
+  // "Now" marker — single dashed vertical crossing both panes so the
+  // top-pane price reading and the bottom-pane Δ reading are visually
+  // tied to the same instant.
   const nowX = xOf(tsNow);
-  svg += `<line x1="${nowX.toFixed(1)}" y1="${innerTop}" x2="${nowX.toFixed(1)}" y2="${innerBottom}" stroke="#22d3ee" stroke-width="0.7" stroke-dasharray="2 3" opacity="0.45" />`;
+  svg += `<line x1="${nowX.toFixed(1)}" y1="${topTop}" x2="${nowX.toFixed(1)}" y2="${botBot}" stroke="#22d3ee" stroke-width="0.7" stroke-dasharray="2 3" opacity="0.45" />`;
 
   // ---------- Latest-value labels at right edge for live read ----------
-  const labelAt = (y, color, txt) => `<text x="${(innerRight + 30).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="start" style="font-size:10px;font-weight:700;fill:${color};dominant-baseline:middle">${txt}</text>`;
-  svg += labelAt(yP(latest.spot),        '#22d3ee', latest.spot.toFixed(0));
+  // Pin labels just inside the respective pane edges so a clamped value
+  // (e.g. spot near pane top) doesn't render above the pane.
+  const labelAt = (y, color, txt, pane) => {
+    const safeY = pane === 'top'
+      ? Math.max(topTop + 6, Math.min(topBot - 4, y))
+      : Math.max(botTop + 6, Math.min(botBot - 4, y));
+    return `<text x="${(innerRight + 30).toFixed(1)}" y="${safeY.toFixed(1)}" text-anchor="start" style="font-size:10px;font-weight:700;fill:${color};dominant-baseline:middle">${txt}</text>`;
+  };
+  svg += labelAt(yP(latest.spot),     '#22d3ee', latest.spot.toFixed(0), 'top');
   if (latest.fut && latest.fut > 0) {
-    svg += labelAt(yP(latest.fut),       '#facc15', latest.fut.toFixed(0));
+    svg += labelAt(yP(latest.fut),    '#facc15', latest.fut.toFixed(0), 'top');
   }
-  svg += labelAt(yD(latest.ce_delta),    '#ef4444', (latest.ce_delta >= 0 ? '+' : '') + latest.ce_delta.toLocaleString('en-IN'));
-  svg += labelAt(yD(latest.pe_delta),    '#22c55e', (latest.pe_delta >= 0 ? '+' : '') + latest.pe_delta.toLocaleString('en-IN'));
+  svg += labelAt(yD(latest.ce_delta), '#ef4444', fmtK(latest.ce_delta), 'bot');
+  svg += labelAt(yD(latest.pe_delta), '#22c55e', fmtK(latest.pe_delta), 'bot');
 
   svg += '</svg>';
 
