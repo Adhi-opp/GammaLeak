@@ -210,6 +210,32 @@ body {
 .inst-metric .k { color: var(--text-dim); }
 .inst-metric .v { font-weight: 500; }
 
+/* Collapsible math partition: hidden by default; revealed when the parent
+   card has the .card-expanded class (toggled by the header chevron). The
+   primary .inst-metrics grid stays visible always — only the secondary
+   .inst-math grid collapses. */
+.inst-math {
+  display: none;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+}
+.inst-card.card-expanded .inst-math { display: grid; }
+
+.card-chevron {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--text-dim);
+  user-select: none;
+  margin-left: 6px;
+  transition: transform 0.15s ease;
+  display: inline-block;
+}
+.card-chevron:hover { color: var(--text); }
+.inst-card.card-expanded .card-chevron { transform: rotate(90deg); }
+
 .inst-signal {
   margin-top: 8px;
   padding-top: 8px;
@@ -1123,6 +1149,28 @@ function renderPreOpen(data) {
   }).join('');
 }
 
+// Per-card expand state for the math dropdown. Survives the 4Hz re-renders
+// (the card grid is re-built from scratch every WS payload, so we re-apply
+// the class on each render from this Set). One-time delegated click handler
+// installed by setupCardToggle on boot.
+const _expandedCards = new Set();
+
+function setupCardToggle() {
+  const grid = document.getElementById('inst-grid');
+  if (!grid) return;
+  grid.addEventListener('click', (e) => {
+    const chevron = e.target.closest('.card-chevron');
+    if (!chevron) return;
+    const card = chevron.closest('.inst-card');
+    const symbol = card?.dataset.symbol;
+    if (!symbol) return;
+    if (_expandedCards.has(symbol)) _expandedCards.delete(symbol);
+    else _expandedCards.add(symbol);
+    // Toggle immediately so the user doesn't wait for the next WS payload.
+    card.classList.toggle('card-expanded');
+  });
+}
+
 function renderInstruments(data) {
   const el = document.getElementById('inst-grid');
   const driverAmber = data.driver_amber || {};
@@ -1203,21 +1251,26 @@ function renderInstruments(data) {
       ? `<div class="verdict-row ${verdictClass(s.english_confidence)}"><span class="verdict-label">${s.english_verdict}</span><span class="verdict-why">${s.english_why || ''}</span></div>`
       : '';
 
-    return `<div class="inst-card ${border} ${priorityClass}">
+    // Preserve user's per-card expand state across the 4Hz re-renders.
+    const expandedClass = _expandedCards.has(s.display) ? ' card-expanded' : '';
+
+    return `<div class="inst-card ${border} ${priorityClass}${expandedClass}" data-symbol="${s.display}">
       <div class="inst-header">
-        <span class="inst-name">${s.display}</span>
+        <span class="inst-name">${s.display}<span class="card-chevron" title="Toggle math">▸</span></span>
         <span class="inst-ltp num ${ltpClass}">${fmtNum(s.ltp, 2)}</span>
       </div>
       <div class="inst-metrics">
         <div class="inst-metric"><span class="k">VWAP</span><span class="v num">${fmtNum(s.vwap, 2)}</span></div>
         <div class="inst-metric"><span class="k">Z-Score</span><span class="v num ${colorVal(-s.z_score)}">${s.z_score > 0 ? '+' : ''}${s.z_score.toFixed(4)}</span></div>
-        <div class="inst-metric"><span class="k">StdDev</span><span class="v num">${s.std_dev.toFixed(4)}</span></div>
+        <div class="inst-metric"><span class="k">ATR</span><span class="v num">${s.atr.toFixed(1)}</span></div>
+        <div class="inst-metric"><span class="k">Thesis</span><span class="v">${thesis}</span></div>
+      </div>
+      <div class="inst-math">
         <div class="inst-metric"><span class="k">μZ 15m</span>${microZCell}</div>
+        <div class="inst-metric"><span class="k">StdDev</span><span class="v num">${s.std_dev.toFixed(4)}</span></div>
         <div class="inst-metric"><span class="k">ER</span><span class="v num">${s.efficiency_ratio.toFixed(2)}</span></div>
         <div class="inst-metric"><span class="k">Hurst</span><span class="v num ${s.hurst >= 0.55 ? 'mag' : ''}">${s.hurst.toFixed(2)}</span></div>
-        <div class="inst-metric"><span class="k">ATR</span><span class="v num">${s.atr.toFixed(1)}</span></div>
         <div class="inst-metric"><span class="k">Regime</span><span class="v text-xs">${s.regime || '-'}</span></div>
-        <div class="inst-metric"><span class="k">Thesis</span><span class="v">${thesis}</span></div>
         ${(s.book_imbalance !== undefined && Math.abs(s.book_imbalance) >= 0.05) ? `<div class="inst-metric"><span class="k">Book</span><span class="v num ${s.book_imbalance > 0 ? 'up' : 'down'}">${s.book_imbalance > 0 ? '+' : ''}${s.book_imbalance.toFixed(2)}</span></div>` : ''}
         ${(s.gap_bucket) ? `<div class="inst-metric"><span class="k">Gap</span><span class="v num ${s.gap_bucket.includes('UP') ? 'up' : s.gap_bucket.includes('DN') ? 'down' : 'neutral'}">${s.gap_pct > 0 ? '+' : ''}${(s.gap_pct ?? 0).toFixed(2)}%</span></div>` : ''}
         ${(s.cvd !== undefined && s.cvd !== 0) ? `<div class="inst-metric"><span class="k">CVD</span><span class="v num ${s.cvd > 0 ? 'up' : 'down'}">${s.cvd > 0 ? '+' : ''}${s.cvd.toLocaleString()}</span></div>` : ''}
@@ -1840,6 +1893,7 @@ function render(data) {
    BOOT
    ================================================================ */
 setupTabs();
+setupCardToggle();
 connect();
 </script>
 </body>
