@@ -1462,6 +1462,24 @@ def get_adaptive_z_thresholds(
 # update_thesis_state moved to signals/exhaustion.py (imported above).
 
 
+def _block_confirm_promotion(state: SymbolState, now_ts: float, reason: str) -> None:
+    """Abort an alert when the regime gate rejects a 1→2 promotion.
+
+    Mirrors the abs_z<exit_z reset path (sig_state=0, alert_side=0, peak_z=0,
+    cleared conviction). The gate reason is stored in setup_label so the
+    resulting ABORT row in events.csv is identifiable as a regime block
+    (filter events.csv on setup_label LIKE 'REGIME_BLOCK:%').
+    """
+    state.sig_state = 0
+    state.alert_side = 0
+    state.peak_z = 0.0
+    state.action_signal = f"REGIME_BLOCK {reason}"
+    state.action_style = "dim magenta"
+    state.last_signal_exit_ts = now_ts
+    state.conviction_score = 0
+    state.setup_label = f"REGIME_BLOCK:{reason}"
+
+
 def update_signal_engine(
     instrument_key: str, state: SymbolState, now_ist: datetime | None = None
 ) -> None:
@@ -1757,6 +1775,13 @@ def update_signal_engine(
                     state, state.alert_side, state.peak_z, exhaustion_peak,
                     state.conviction_score, now_ist,
                 )
+                # Regime gate: drop known-bad (setup, regime) pairs into ABORT
+                # instead of CONFIRM. Rules live in core.config.SETUP_REGIME_RULES.
+                _allowed, _gate_reason = evaluate_regime_gate(
+                    state.setup_label, state.regime, state.conviction_score,
+                )
+                if not _allowed:
+                    _block_confirm_promotion(state, now_ts, _gate_reason)
         elif side != 0 and side != state.alert_side and abs_z >= alert_z:
             state.alert_side = side
             state.peak_z = z_score
@@ -1833,6 +1858,12 @@ def update_signal_engine(
                 state, state.alert_side, state.peak_z, exhaustion_peak,
                 state.conviction_score, now_ist,
             )
+            # Regime gate (mirror of main-path check above).
+            _allowed_r, _gate_reason_r = evaluate_regime_gate(
+                state.setup_label, state.regime, state.conviction_score,
+            )
+            if not _allowed_r:
+                _block_confirm_promotion(state, now_ts, _gate_reason_r)
 
     # MFE tracking cleanup: once we're back to sig_state=0 (any reset path),
     # clear the captured entry so the next 0→1 transition starts fresh.

@@ -384,6 +384,47 @@ MFE_ATR_PROXY_WINDOW_SECS = 300
 UPSTOX_CURRENCY_UNDERLYINGS = ("USDINR", "EURINR", "GBPINR", "JPYINR")
 
 
+# --------------------------- REGIME GATE ---------------------------
+# Block or elevate the bar for (setup, regime) pairs that empirically
+# underperform on MFE-graded outcomes. Rules are checked at the 1→2
+# sig_state promotion (and at the MFE-retry promotion). A blocked
+# promotion becomes an ABORT event with the gate reason captured in
+# the setup_label slot of the events.csv row.
+#
+# Source: 4-day rolling MFE-grade table (2026-05-19..22).
+#   ORB BREAK L | NORMAL       = 4/17  = 24%  -> BLOCK
+#   EXHAUSTION REV S | NORMAL  = 5/19  = 26%  -> require conviction ≥ 4
+# Whitelist (no rule needed, free pass): any *DIVERGE regime (4/5 = 80%).
+#
+# Tuple format: (setup_label_exact, regime_substring, action).
+# action ∈ {"BLOCK", "REQUIRE_CONV_<n>"}
+SETUP_REGIME_RULES: list[tuple[str, str, str]] = [
+    ("ORB BREAK L",      "NORMAL", "BLOCK"),
+    ("EXHAUSTION REV S", "NORMAL", "REQUIRE_CONV_4"),
+]
+
+
+def evaluate_regime_gate(setup_label: str, regime: str, conviction: int) -> tuple[bool, str]:
+    """Check (setup, regime) against the rule table.
+
+    Returns (allowed, reason). reason is "" when allowed.
+    Reason format on block: "<setup>|<regime>" so it lands in the ABORT
+    event row cleanly and is searchable in events.csv.
+    """
+    if not setup_label or not regime:
+        return True, ""
+    for rule_setup, rule_regime, action in SETUP_REGIME_RULES:
+        if setup_label == rule_setup and rule_regime in regime:
+            if action == "BLOCK":
+                return False, f"{rule_setup}|{rule_regime}"
+            if action.startswith("REQUIRE_CONV_"):
+                required = int(action.rsplit("_", 1)[-1])
+                if conviction < required:
+                    return False, f"{rule_setup}|{rule_regime}|CONV<{required}"
+            break
+    return True, ""
+
+
 # --------------------------- OI FLOW TIMELINE ---------------------------
 
 OI_FLOW_MIN_DELTA = 500                  # Minimum net OI change to classify (avoid noise)
