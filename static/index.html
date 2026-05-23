@@ -1191,9 +1191,17 @@ function renderInstruments(data) {
 
     // When english verdict has real conviction, mark the card so CSS can
     // demote the old action_signal + setup_label badges that may contradict.
+    // Gated on sig_state>=1 so a dead card doesn't keep its alarm highlight
+    // (the verdict pipeline can lag the engine reset by a few ticks).
     let priorityClass = '';
-    if (s.english_confidence === 'HIGH') priorityClass = 'verdict-priority-high';
-    else if (s.english_confidence === 'MED') priorityClass = 'verdict-priority-med';
+    if (s.sig_state >= 1) {
+      if (s.english_confidence === 'HIGH') priorityClass = 'verdict-priority-high';
+      else if (s.english_confidence === 'MED') priorityClass = 'verdict-priority-med';
+    }
+    // Same gate for the verdict row — suppress when no active alert/confirm.
+    const verdictRowHTML = (s.english_verdict && s.sig_state >= 1)
+      ? `<div class="verdict-row ${verdictClass(s.english_confidence)}"><span class="verdict-label">${s.english_verdict}</span><span class="verdict-why">${s.english_why || ''}</span></div>`
+      : '';
 
     return `<div class="inst-card ${border} ${priorityClass}">
       <div class="inst-header">
@@ -1215,7 +1223,7 @@ function renderInstruments(data) {
         ${(s.cvd !== undefined && s.cvd !== 0) ? `<div class="inst-metric"><span class="k">CVD</span><span class="v num ${s.cvd > 0 ? 'up' : 'down'}">${s.cvd > 0 ? '+' : ''}${s.cvd.toLocaleString()}</span></div>` : ''}
       </div>
       ${zBarHTML(s.z_score)}
-      ${(s.english_verdict) ? `<div class="verdict-row ${verdictClass(s.english_confidence)}"><span class="verdict-label">${s.english_verdict}</span><span class="verdict-why">${s.english_why || ''}</span></div>` : ''}
+      ${verdictRowHTML}
       ${(amberTag || spikeTag || setupBadge || convictionStars) ? `<div class="mt-4">${amberTag}${spikeTag}${setupBadge}${convictionStars}</div>` : ''}
       <div class="inst-signal">
         <span class="signal-badge ${sigBg}">${sigText}</span>
