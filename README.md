@@ -16,15 +16,15 @@
 | Aspect | Detail |
 |---|---|
 | **Domain** | Live tick stream from Upstox WebSocket v3 — NIFTY 50, BANKNIFTY, NIFTY/BN front-month futures, USDINR FUT, CRUDEOIL FUT, India VIX, plus equity drivers (RELIANCE, HDFCBANK, SBIN, ICICIBANK) and a dynamic NIFTY option-chain window |
-| **Scale** | ~500 k+ ticks per session across 8 core instruments + dynamic option strikes, sustained 50–200 ticks/s, 200+ during bursts |
-| **Codebase** | ~8,300 lines Python across `GammaLeak.py` (3,746) + 6 packages (`core`, `ui`, `orderflow`, `signals`, `analytics`, `gammaleak_runtime`) + FastAPI broadcaster (256) + ~2,250 lines vanilla-JS dashboard (`static/index.html` 1,758 + `static/simulation.html` 488) |
+| **Scale** | Measured across 10 sessions (2026-05-11 … 2026-05-22): **164K–330K logged ticks per session** (mean 254K) for 9 core instruments; aggregate tick rate **avg 13/s, p95 17/s, peak 37–41/s** on the busiest sessions (single-symbol peak 12/s) |
+| **Codebase** | ~9,500 lines Python: `GammaLeak.py` (4,032) + 6 packages (`core`, `ui`, `orderflow`, `signals`, `analytics`, `gammaleak_runtime`, 3,542 total) + FastAPI broadcaster (256) + utility scripts (1,429); ~2,390 lines vanilla-JS dashboard (`static/index.html` 1,902 + `static/simulation.html` 488) |
 | **Pipeline** | gzip → protobuf decode → per-symbol `SymbolState` → 6-stage math + Lee-Ready aggressor → CVD + 5 divergence patterns → English-verdict composer → 4 Hz WebSocket fan-out + per-symbol CSV |
 | **Persistence** | 20-column versioned schema, **per-symbol parallel log streams** under `logs/YYYY-MM-DD/<SYMBOL>.csv`, **schema-aware rotation** at boot (legacy files auto-archived), depth-drop-safe order-book extraction |
 | **Differentiator** | F&O domain depth — Lee-Ready CVD, OI-flow velocity, max-pain + gamma walls, gamma-flush detection, ATM straddle box, spot↔FUT verdict mirror — layered cleanly on top of streaming-systems engineering |
 
 ## What this project demonstrates
 
-- **Streaming systems** — protobuf decode at sustained 50+ ticks/s, `asyncio.Queue` decoupling tick path from disk path, `asyncio.to_thread` batched writes (5 ticks or 1 s), ≤ 250 ms broadcast cycle, WebSocket silence watchdog + reconnect loop.
+- **Streaming systems** — protobuf decode at measured ~13 ticks/s sustained / ~40 ticks/s peak across 9 symbols, `asyncio.Queue` decoupling tick path from disk path, `asyncio.to_thread` batched writes (5 ticks or 1 s), ≤ 250 ms broadcast cycle, WebSocket silence watchdog + reconnect loop.
 - **Schema engineering** — versioned 20-column CSV schema; bootloader detects legacy-schema files on disk and archives them with a timestamp suffix before opening fresh streams; no silent corruption across schema bumps.
 - **Reliability under live-feed chaos** — exchange depth drops to zero levels gracefully handled with `try/except` around `marketLevel.bidAskQuote[0]`; instrument-master resolver **loud-fails** on missing contracts instead of hardcoding fallbacks; daily expiry rollover handled by a self-healing instrument-master cache.
 - **Domain depth** — Lee-Ready aggressor classification (tick rule + midpoint refinement on zero-tick), cumulative volume delta with **pullback-validated** exhaustion detectors (kills gap-day false fires), OI-delta flow classification (NEW LONGS / NEW SHORTS / SHORT COVER / LONG EXIT), max-pain + gamma-wall anchors, spot-to-FUT verdict mirroring so spot cards inherit flow context from the volume-bearing futures leg.
@@ -85,7 +85,7 @@ flowchart LR
 Discretionary F&O traders monitor 6+ instruments (NIFTY, BANKNIFTY, USDINR, Crude, RELIANCE, HDFCBANK) + options OI + global cues simultaneously. The three pathologies this tool addresses:
 
 1. **Attention overload** — collapse everything into one HUD/dashboard that surfaces the *statistically anomalous* instrument in real time.
-2. **Late-tape problem** — after ~10:30 AM the session VWAP becomes "heavy" and micro-flushes stop registering in the session Z-score. Signals arrive *after* the move. The V5.2 Micro-Structural Layer adds a rolling 15-min anchor + Z-velocity + tick-rate + cross-asset acceleration amber to reclaim ~30–90 seconds of early warning.
+2. **Late-tape problem** — after ~10:30 AM the session VWAP becomes "heavy" and micro-flushes stop registering in the session Z-score. Signals arrive *after* the move. The V5.2 Micro-Structural Layer adds a rolling 15-min anchor + Z-velocity + tick-rate + cross-asset acceleration amber so a fresh anomaly can be flagged before the session Z catches up. The lead-time isn't benchmarked across events (would need amber/CONFIRM timestamp pairs that the current events.csv schema doesn't capture); the *design intent* is that a 900 s rolling window can't be diluted the way a cumulative session anchor can.
 3. **OI without context** — raw max-pain / PCR snapshots don't show flow. The OI-flow classifier diffs ATM±2 CE/PE OI per tick, labels the quadrant (NEW LONGS / NEW SHORTS / SHORT COVER / LONG EXIT), and feeds an anchored 30-min velocity chart so liquidity sweeps, floor failures, and max-pain magnets become visually inspectable.
 
 ---
@@ -141,10 +141,10 @@ The engine is an **additive** stack — every new layer was shipped *without* de
 
 | # | Layer | Parameter | Purpose |
 |---|-------|-----------|---------|
-| 1 | **Rolling 15-min Micro-Z** | 900 s window, ≥30 ticks, SD floor = 15% × ATR | De-anchors from heavy session VWAP; catches post-10:30 flushes session Z misses |
-| 2 | **Z-velocity amber** | dZ/dt over 30 s ≥ 0.05/s, armed in `0.7 ≤ |Z| < 2.0` | Pre-alert tier *below* `sig_state=1` — fires ~15–45 s before the state machine trips |
+| 1 | **Rolling 15-min Micro-Z** | 900 s window, ≥30 ticks, SD floor = 15% × ATR | De-anchors from heavy session VWAP so post-10:30 flushes register as outliers even after the cumulative variance has settled |
+| 2 | **Z-velocity amber** | dZ/dt over 30 s ≥ 0.05/s, armed in `0.7 ≤ |Z| < 2.0` | Pre-alert tier *below* `sig_state=1` — designed to fire before the state machine trips (lead-time not yet logged for measurement) |
 | 3 | **Tick-arrival-rate spike** | 10 s short rate ≥ 2× 10-min baseline, min 0.5 Hz | "Something is happening right now" — advisory ⚡ chip |
-| 4 | **Driver acceleration amber** | HDFCBANK/RELIANCE dZ/dt ≥ 0.06/s propagates to NIFTY while `|NIFTY Z| < 1.5` and `sig_state = 0` | Front-run the lead-lag (large-cap flow leads NIFTY by 5–20 s) |
+| 4 | **Driver acceleration amber** | HDFCBANK/RELIANCE dZ/dt ≥ 0.06/s propagates to NIFTY while `|NIFTY Z| < 1.5` and `sig_state = 0` | Front-run the cross-asset lead-lag (large-cap flow tends to lead NIFTY; magnitude not benchmarked) |
 
 All four layers **only paint UI chips** (`AMBER ↑/↓`, `μZ`, `⚡ BURST`) — the hard sig_state machine is untouched.
 
@@ -492,11 +492,13 @@ Historical artifacts retained for reference (multi-session NIFTY/BANKNIFTY regim
 
 ### Why rolling 15-min Micro-Z on top of session Z?
 
-Session VWAP is a *cumulative* anchor — after 10:30 AM it aggregates enough volume that rolling 60 s σ tightens and new flushes register as *small* Z-moves even when they're large in price terms. A synthetic test showed session Z = 0.00σ vs Micro-Z = −4.98σ on the same sharp drop. Micro-Z uses a trailing-window mean (not cumulative), so it "forgets" quickly and stays sensitive late in the day. The session Z still runs in parallel — Micro-Z is **additive**, not a replacement.
+Session VWAP is a *cumulative* anchor — after 10:30 AM it aggregates enough volume that rolling 60 s σ tightens and new flushes register as *small* Z-moves even when they're large in price terms. Micro-Z uses a trailing 15-min window mean (not cumulative), so it "forgets" quickly and stays sensitive late in the day. The session Z still runs in parallel — Micro-Z is **additive**, not a replacement.
+
+(A worked synthetic example used during design: on a sharp engineered drop where the cumulative VWAP/σ produced a near-zero session Z, the 15-min trailing window registered the move as a ~5σ outlier. The two metrics are intentionally answering different questions — "is this an outlier vs the entire session?" vs "is this an outlier vs the last 15 minutes?")
 
 ### Why Z-velocity as an amber tier?
 
-By the time `|Z| ≥ 2.0` fires the Phase 2 state machine, the move is often 60–90 s old. dZ/dt captures the *rate* of stretching — if Z goes from 0.8 → 1.4 in 20 s (dZ/dt = 0.03/s), something is accelerating. Amber fires in the `0.7 ≤ |Z| < 2.0` band with dZ/dt ≥ 0.05/s, giving a ~15–45 s heads-up *before* the hard state machine commits. It never forces entry — it only paints a UI chip.
+The Phase 2 state machine doesn't trip until `|Z| ≥ 2.0`, by which time a move is often partially developed. dZ/dt captures the *rate* of stretching — if Z goes from 0.8 → 1.4 in 20 s (dZ/dt = 0.03/s), something is accelerating. Amber fires in the `0.7 ≤ |Z| < 2.0` band with dZ/dt ≥ 0.05/s, providing a pre-alert tier *below* the hard state machine. It never forces entry — it only paints a UI chip. (Lead-time vs the eventual ALERT isn't currently measured because events.csv doesn't log amber transitions; this is on the validation backlog.)
 
 ### Why both Hurst **and** Kaufman ER for regime?
 
@@ -508,7 +510,57 @@ Snapshot PCR + max-pain tells you positioning but not *intent*. Diffing ATM±2 C
 
 ### Why Protobuf over JSON for WebSocket?
 
-Upstox v3 WebSocket sends gzip-compressed Protobuf. At 50 ticks/s sustained and ~200 ticks/s burst, binary decoding is ~3–6× faster than JSON parse — meaningful for dashboard responsiveness when the tick writer is also competing for the event loop.
+Upstox v3 WebSocket sends gzip-compressed Protobuf. Measured aggregate rate on the live feed is modest (avg ~13 ticks/s, peak ~40 ticks/s across 9 symbols on the busiest sessions), but binary decoding is still meaningfully cheaper than JSON parse per-tick — and protocol choice was Upstox's, not ours. The relevant engineering decision is keeping the decode path off the event-loop critical section so the dashboard broadcast and disk writer never starve.
+
+---
+
+## Measured Performance
+
+All numbers below are reproducible from `logs/` (10 sessions, 2026-05-11 … 2026-05-22) and the engine config — no synthetic events, no rounded-up approximations.
+
+### Throughput (live feed)
+
+| Metric | Value | Source |
+|---|---|---|
+| Logged ticks per session (9 core symbols) | 164K – 330K (mean 254K) | `wc -l logs/YYYY-MM-DD/*.csv` × 10 sessions |
+| Aggregate tick rate, mean | ~13 ticks/s | per-second bucket count, busiest sessions |
+| Aggregate tick rate, p95 | ~17 ticks/s | same |
+| Aggregate tick rate, peak (1 s bucket) | 37–41 ticks/s | same |
+| Single-symbol peak (NIFTY) | 12 ticks/s | `awk` per-second bucket on NIFTY.csv |
+| Broadcast cadence | 4 Hz (250 ms) | `asyncio.sleep(0.25)` in `web_server.py` broadcast loop |
+| Disk-writer batch | 5 ticks **or** 1 s | `LOG_BATCH_SIZE=5`, `LOG_FLUSH_INTERVAL_SECS=1.0` |
+| WebSocket silence watchdog | 30 s | `WS_TICK_TIMEOUT_SECS=30` |
+
+### Signal quality (MFE-graded backtest)
+
+A signal is graded **OK** if max favourable excursion in the 10-minute window after CONFIRM clears a per-symbol noise floor (NIFTY/NIFTY\_FUT 15 pts, BANKNIFTY/BN\_FUT 40 pts, CRUDEOIL 15 pts, stocks 3–5 pts, USDINR 0.05 pts; ATR-scaled with `MFE_ATR_K = 0.5`). Sample = 4 sessions where `events.csv` was being persisted (the writer landed mid-month).
+
+| Configuration | OK / Total | Hit rate |
+|---|---|---|
+| Baseline (no regime gate) | 56 / 137 | 40.9% |
+| With regime gate (block `ORB BREAK L \| NORMAL`; require conviction ≥ 4 for `EXHAUSTION REV S \| NORMAL`) | 48 / 103 | **46.6%** (+5.7pp) |
+
+Volume cost of the gate: −8.5 signals/day; of the 34 historical blocks, 26 were WEAK (correctly dropped) and 8 were OK (collateral damage). Net: ~3.25:1 ratio of false-positives blocked vs OK sacrificed.
+
+Per-symbol breakdown (4-day blend, post-gate would be similar shape):
+
+| Symbol | OK / N | Rate |
+|---|---|---|
+| BN_FUT | 20 / 36 | 55.6% |
+| NIFTY | 10 / 19 | 52.6% |
+| NIFTY_FUT | 12 / 26 | 46.2% |
+| BANKNIFTY | 12 / 26 | 46.2% |
+| RELIANCE | 1 / 7 | 14.3% |
+| CRUDEOIL | 1 / 10 | 10.0% |
+| HDFCBANK | 0 / 13 | 0.0% |
+
+Index futures (BN\_FUT, NIFTY\_FUT) carry the engine; equity/commodity floors need re-tuning or symbol-level removal.
+
+### What is **not** benchmarked (yet)
+
+- **V5.2 amber lead-time vs ALERT** — `events.csv` doesn't log amber transitions, so the design claim that amber fires *before* the state machine is unmeasured.
+- **OI flow timeline anchor accuracy** — `analyze_oi_chart.py` produces touch-respect tables (~45% max-pain 15m respect on the 2026-05-22 sample) but the full distribution across sessions isn't aggregated.
+- **End-to-end latency** (tick-on-wire → dashboard pixel) — would need synchronized timestamps; current `last_tick_ts` is engine-side only.
 
 ---
 
@@ -535,6 +587,7 @@ Upstox v3 WebSocket sends gzip-compressed Protobuf. At 50 ticks/s sustained and 
 | V5.0 | Apr 15, 2026 | NSE FII/DII participant OI integration |
 | V5.1 | Apr 16, 2026 | Per-strike OI Δ flow classification |
 | V5.2 | Apr 20, 2026 | Micro-Structural Layer (Micro-Z / Z-velocity / Tick-rate / Driver acceleration) + FastAPI browser dashboard + self-healing instrument master |
+| V5.3 | May 2026 | Events.csv writer (sig_state transitions persisted); MFE-graded backtest harness (10-min forward window, per-symbol noise floor, ATR-scaled with K=0.5); OI-Flow state mirror (`logs/<date>_oi_state.csv`) + retroactive `analyze_oi_chart.py`; regime-gated CONFIRM filter (+5.7pp hit-rate lift on 4-session sample); two-pane OI Flow chart with render throttling, Y-clamp, area fills; collapsible per-card math dropdown; Phase 1 OFI observational layer (ΔTBQ−ΔTSQ + 4-quadrant absorption tag, no engine action) |
 
 ---
 
