@@ -226,15 +226,29 @@ body {
 
 .card-chevron {
   cursor: pointer;
-  font-size: 11px;
+  font-size: 10px;
   color: var(--text-dim);
   user-select: none;
-  margin-left: 6px;
-  transition: transform 0.15s ease;
+  margin-left: 8px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
   display: inline-block;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  vertical-align: middle;
 }
-.card-chevron:hover { color: var(--text); }
-.inst-card.card-expanded .card-chevron { transform: rotate(90deg); }
+.card-chevron:hover {
+  color: var(--text);
+  background: var(--bg-card-hover, rgba(255,255,255,0.05));
+  border-color: var(--text-dim);
+}
+.inst-card.card-expanded .card-chevron {
+  color: var(--text);
+  background: rgba(34, 211, 238, 0.08);
+  border-color: rgba(34, 211, 238, 0.35);
+}
 
 .inst-signal {
   margin-top: 8px;
@@ -1252,11 +1266,13 @@ function renderInstruments(data) {
       : '';
 
     // Preserve user's per-card expand state across the 4Hz re-renders.
-    const expandedClass = _expandedCards.has(s.display) ? ' card-expanded' : '';
+    const isExpanded = _expandedCards.has(s.display);
+    const expandedClass = isExpanded ? ' card-expanded' : '';
+    const chevronGlyph = isExpanded ? '▾ math' : '▸ math';
 
     return `<div class="inst-card ${border} ${priorityClass}${expandedClass}" data-symbol="${s.display}">
       <div class="inst-header">
-        <span class="inst-name">${s.display}<span class="card-chevron" title="Toggle math">▸</span></span>
+        <span class="inst-name">${s.display}<span class="card-chevron" title="Show / hide μZ · ER · Hurst · CVD · ΔOFI etc.">${chevronGlyph}</span></span>
         <span class="inst-ltp num ${ltpClass}">${fmtNum(s.ltp, 2)}</span>
       </div>
       <div class="inst-metrics">
@@ -1757,6 +1773,10 @@ function renderOIFlowTimeline(data) {
   // In-range anchors render as a full dashed horizontal. Off-range anchors
   // (beyond the Y-clamp window) render as a pinned distance badge at the
   // pane edge with a direction arrow + signed offset from latest spot.
+  // Off-canvas badges stack vertically (12px increments) so PE WALL +
+  // MAX PAIN both below pLo don't overprint each other at topBot.
+  let _ocStackTop = 0;   // count of badges pinned at topTop
+  let _ocStackBot = 0;   // count of badges pinned at topBot
   const drawAnchor = (strike, color, label) => {
     if (!strike) return '';
     if (strike >= pLo && strike <= pHi) {
@@ -1769,8 +1789,10 @@ function renderOIFlowTimeline(data) {
     // Off-canvas: pin at top or bottom edge with arrow + signed offset from spot.
     const offset = strike - latest.spot;
     const sign = offset >= 0 ? '+' : '−';
-    const arrow = strike > pHi ? '↑' : '↓';
-    const badgeY = (strike > pHi ? topTop + 10 : topBot - 4).toFixed(1);
+    const aboveTop = strike > pHi;
+    const arrow = aboveTop ? '↑' : '↓';
+    const stackOffset = aboveTop ? (_ocStackTop++ * 12) : (_ocStackBot++ * 12);
+    const badgeY = (aboveTop ? topTop + 10 + stackOffset : topBot - 4 - stackOffset).toFixed(1);
     return `
       <text x="${innerRight - 4}" y="${badgeY}" text-anchor="end" style="font-size:9px;fill:${color};opacity:0.75;letter-spacing:0.4px">${arrow} ${label} ${strike.toLocaleString('en-IN')} (${sign}${Math.abs(Math.round(offset))})</text>
     `;
