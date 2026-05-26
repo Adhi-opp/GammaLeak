@@ -36,6 +36,7 @@ from core.models import (
 DISPLAY_NAMES: dict[str, str] = {
     "NSE_INDEX|Nifty 50": "NIFTY",
     "NSE_INDEX|Nifty Bank": "BANKNIFTY",
+    "BSE_INDEX|SENSEX": "SENSEX",
     "NSE_INDEX|India VIX": "VIX",
     "NSE_FO|USDINR26MAYFUT": "USDINR",
     "MCX_FO|CRUDEOIL26MAYFUT": "CRUDEOIL",

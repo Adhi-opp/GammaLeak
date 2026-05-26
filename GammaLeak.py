@@ -115,6 +115,7 @@ SYMBOL_PROFILES: dict[str, dict[str, float]] = {
 FOCUS_PRIORITY: dict[str, int] = {
     "NSE_INDEX|Nifty Bank": 0,
     "NSE_INDEX|Nifty 50": 1,
+    "BSE_INDEX|SENSEX": 1,  # tied with NIFTY — they correlate tightly
     "NSE_FO|USDINR26MAYFUT": 2,
     "MCX_FO|CRUDEOIL26MAYFUT": 3,
     "NSE_EQ|HDFCBANK": 4,
@@ -167,6 +168,12 @@ async def get_active_expiry_key(symbol: str, instrument_type: str = "FUT"):
 
         for m in instruments:
             key = m.get("instrument_key", "")
+            # Exact underlying disambiguation. The tradingsymbol regex catches
+            # most lookalikes (NIFTYNXT50 vs NIFTY) but SENSEX vs SENSEX50 share
+            # a prefix and BOTH start with a digit after the underlying, so the
+            # regex alone can't separate them. The `name` column does.
+            if m.get("name", "") and m["name"] != symbol:
+                continue
             # Filter Options vs Futures
             if instrument_type == "OPT" and ("CE" not in tradingsymbol and "PE" not in tradingsymbol):
                 continue
@@ -418,7 +425,12 @@ INSTRUMENT_MASTER_CACHE_PATH = Path("data") / "upstox_master_cache.csv.gz"
 
 
 def _parse_instrument_master_bytes(payload: bytes) -> dict[str, list[dict[str, str]]]:
-    """Parse the gz-encoded Upstox master into the symbol→rows index."""
+    """Parse the gz-encoded Upstox master into the symbol→rows index.
+
+    `name` is captured alongside the other fields so callers can do exact
+    underlying disambiguation (e.g. SENSEX vs SENSEX50 share a tradingsymbol
+    prefix; only the `name` column reliably separates them).
+    """
     try:
         decoded = gzip.decompress(payload)
     except (EOFError, OSError):
@@ -430,10 +442,11 @@ def _parse_instrument_master_bytes(payload: bytes) -> dict[str, list[dict[str, s
         exchange = (row.get("exchange") or "").strip().upper()
         master_key = (row.get("instrument_key") or "").strip()
         expiry = (row.get("expiry") or "").strip()
+        name = (row.get("name") or "").strip().upper()
         if not tradingsymbol or not exchange or not master_key:
             continue
         master.setdefault(tradingsymbol, []).append(
-            {"exchange": exchange, "instrument_key": master_key, "expiry": expiry}
+            {"exchange": exchange, "instrument_key": master_key, "expiry": expiry, "name": name}
         )
     return master
 
@@ -3264,6 +3277,7 @@ async def resolve_dynamic_instruments():
     usdinr_key, _ = await get_active_expiry_key("USDINR", "FUT")
     nifty_fut_key, _ = await get_active_expiry_key("NIFTY", "FUT")
     banknifty_fut_key, _ = await get_active_expiry_key("BANKNIFTY", "FUT")
+    sensex_fut_key, _ = await get_active_expiry_key("SENSEX", "FUT")
 
     # No silent hardcoded fallbacks — master loader already survives network
     # hiccups via disk cache, so reaching here with None means the symbol is
@@ -3297,6 +3311,14 @@ async def resolve_dynamic_instruments():
     else:
         missing.append("BANKNIFTY FUT (NSE_FO)")
 
+    # SENSEX FUT is non-fatal — Upstox sometimes returns nothing for BSE_FO under
+    # certain auth scopes. Warn loudly but let the engine boot without it so
+    # NIFTY/BANKNIFTY trading isn't blocked by a BSE outage.
+    if sensex_fut_key:
+        console.print(f"[green][OK] SENSEX Futures (front-month): {sensex_fut_key}[/green]")
+    else:
+        console.print("[yellow][WARN] SENSEX FUT not resolvable from master — SENSEX card will run on spot only[/yellow]")
+
     if missing:
         raise RuntimeError(
             "Cannot resolve active contracts for: " + ", ".join(missing) +
@@ -3313,6 +3335,7 @@ async def resolve_dynamic_instruments():
     INSTRUMENT_KEYS.extend([
         "NSE_INDEX|Nifty 50",
         "NSE_INDEX|Nifty Bank",
+        SENSEX_INDEX_KEY,
         VIX_INSTRUMENT_KEY,
         nifty_fut_key,
         banknifty_fut_key,
@@ -3321,15 +3344,21 @@ async def resolve_dynamic_instruments():
         "NSE_EQ|RELIANCE",
         "NSE_EQ|HDFCBANK",
     ])
+    if sensex_fut_key:
+        INSTRUMENT_KEYS.append(sensex_fut_key)
 
     DISPLAY_NAMES[usdinr_key] = "USDINR"
     DISPLAY_NAMES[crude_key] = "CRUDEOIL"
     DISPLAY_NAMES[nifty_fut_key] = "NIFTY_FUT"
     DISPLAY_NAMES[banknifty_fut_key] = "BN_FUT"
+    if sensex_fut_key:
+        DISPLAY_NAMES[sensex_fut_key] = "SENSEX_FUT"
     FOCUS_PRIORITY[usdinr_key] = 2
     FOCUS_PRIORITY[crude_key] = 3
     FOCUS_PRIORITY[nifty_fut_key] = 6
     FOCUS_PRIORITY[banknifty_fut_key] = 7
+    if sensex_fut_key:
+        FOCUS_PRIORITY[sensex_fut_key] = 8
 
     # Sync USDINR_KEYS with the resolved numeric token. Without this the
     # HTTP bootstrap poll + usdinr_direction() lookup at runtime both fail

@@ -129,6 +129,11 @@ USDINR_Z_BOOST = 0.80                       # multiply Z thresholds near RBI lev
 # --------------------------- INDIA VIX ---------------------------
 
 VIX_INSTRUMENT_KEY = "NSE_INDEX|India VIX"
+# BSE SENSEX spot — stable key, present in Upstox master under name="SENSEX".
+# SENSEX_FUT is resolved dynamically (BSE_FO|SENSEX<YY><MMM>FUT). The matching
+# logic in get_active_expiry_key relies on the `name` column to disambiguate
+# from SENSEX50 (lot 75) contracts which share the trading-symbol prefix.
+SENSEX_INDEX_KEY = "BSE_INDEX|SENSEX"
 VIX_HIGH_THRESHOLD = 18.0       # Above this: widen Z-thresholds (fear regime)
 VIX_LOW_THRESHOLD = 12.0        # Below this: tighten Z-thresholds (complacency)
 VIX_HIGH_SCALE = 1.30           # Multiply Z-thresholds by 1.3x in fear
@@ -172,6 +177,10 @@ INDEX_DRIVER_PAIRS: list[tuple[str, str]] = [
     ("NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"),
     ("NSE_INDEX|Nifty 50", "NSE_EQ|RELIANCE"),
     ("NSE_INDEX|Nifty Bank", "NSE_EQ|HDFCBANK"),
+    # SENSEX correlates tightly with NIFTY (overlapping constituents). Use it as
+    # a confluence/cross-check on direction — divergence between the two is rare
+    # and meaningful when it shows up.
+    ("NSE_INDEX|Nifty 50", "BSE_INDEX|SENSEX"),
 ]
 
 
@@ -359,6 +368,8 @@ MIN_FAVORABLE_POINTS_PER_SYMBOL: dict[str, float] = {
     "NIFTY_FUT":  15.0,
     "BANKNIFTY":  40.0,
     "BN_FUT":     40.0,
+    "SENSEX":     50.0,   # SENSEX ~3x NIFTY in absolute pts; lot 20 → 50pt floor
+    "SENSEX_FUT": 50.0,   # mirror of spot floor; tighten after a few sessions if data warrants
     "RELIANCE":    3.0,
     "HDFCBANK":    3.0,
     "SBIN":        3.0,
