@@ -31,6 +31,7 @@ BASE_URL = "https://api.upstox.com/v2/historical-candle"
 SYMBOLS = {
     "NIFTY":     "NSE_INDEX|Nifty 50",
     "BANKNIFTY": "NSE_INDEX|Nifty Bank",
+    "SENSEX":    "BSE_INDEX|SENSEX",
     "RELIANCE":  "NSE_EQ|RELIANCE",
     "HDFCBANK":  "NSE_EQ|HDFCBANK",
 }

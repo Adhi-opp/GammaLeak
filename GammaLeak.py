@@ -555,7 +555,9 @@ async def resolve_historical_instrument_key(
         return instrument_key
 
     # --- Bypass for Spot Indices (name-based keys accepted by Upstox API) ---
-    if instrument_key.startswith("NSE_INDEX|"):
+    # Both NSE_INDEX and BSE_INDEX use name-based keys (Nifty 50, India VIX,
+    # SENSEX) which the Upstox REST API accepts as-is — no token swap needed.
+    if instrument_key.startswith("NSE_INDEX|") or instrument_key.startswith("BSE_INDEX|"):
         _historical_key_cache[instrument_key] = instrument_key
         return instrument_key
 
@@ -3090,8 +3092,9 @@ async def ws_task(log_queue: asyncio.Queue, tick_queue: asyncio.Queue) -> None:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             resolved_keys: dict[str, str] = {}
             for key in SUBSCRIPTION_KEYS:
-                # BYPASS Spot Indices (name-based keys work for indices)
-                if "NSE_INDEX" in key:
+                # BYPASS Spot Indices (name-based keys work for indices on both
+                # NSE and BSE — Nifty 50, India VIX, SENSEX, etc.).
+                if "NSE_INDEX" in key or "BSE_INDEX" in key:
                     resolved_keys[key] = key
                     continue
 
@@ -3204,8 +3207,10 @@ async def mock_ws_task(log_queue: asyncio.Queue) -> None:
             else: baselines[instrument_key] += random.uniform(-5.0, 5.0)
 
             ltp = baselines[instrument_key]
-            if instrument_key.startswith("NSE_INDEX|"): vtt = 0
-            else: vtt = state.last_vtt + random.randint(10, 100)
+            if instrument_key.startswith("NSE_INDEX|") or instrument_key.startswith("BSE_INDEX|"):
+                vtt = 0  # spot indices carry no traded volume
+            else:
+                vtt = state.last_vtt + random.randint(10, 100)
             record_tick(instrument_key, ltp, vtt, timestamp, log_queue)
 
         update_mock_pcr(timestamp)
@@ -3233,7 +3238,9 @@ async def _prefetch_prior_closes(instrument_keys: list[str]) -> None:
             try:
                 # Resolve to the numeric token if needed (futures use NSE_FO|<token> already)
                 fetch_key = key
-                if not instrument_key_uses_numeric_token(key) and "NSE_INDEX" not in key:
+                if (not instrument_key_uses_numeric_token(key)
+                        and "NSE_INDEX" not in key
+                        and "BSE_INDEX" not in key):
                     try:
                         fetch_key = await resolve_historical_instrument_key(session, key)
                     except Exception:
@@ -3373,12 +3380,16 @@ async def resolve_dynamic_instruments():
 
     # Pre-open: fetch prior trading-day daily close for NIFTY/BANKNIFTY spot + futures
     # so gap_pct can be computed at the first tick. Failure is non-fatal — gap_pct stays 0.
-    await _prefetch_prior_closes([
+    _prior_close_keys = [
         "NSE_INDEX|Nifty 50",
         "NSE_INDEX|Nifty Bank",
+        SENSEX_INDEX_KEY,
         nifty_fut_key,
         banknifty_fut_key,
-    ])
+    ]
+    if sensex_fut_key:
+        _prior_close_keys.append(sensex_fut_key)
+    await _prefetch_prior_closes(_prior_close_keys)
 
     # Fetch current NIFTY LTP for accurate ATM strike at boot
     boot_base_strike = PCR_BASE_STRIKE
