@@ -1,0 +1,12 @@
+[Unit]
+Description=Stop GammaLeak engine at 15:35 IST on weekdays
+
+[Timer]
+# Market closes 15:30 IST; +5min lets the disk-writer flush and the OI Flow
+# state mirror persist the final samples before shutdown.
+OnCalendar=Mon..Fri 15:35:00 Asia/Kolkata
+Persistent=true
+Unit=gammaleak-stop.service
+
+[Install]
+WantedBy=timers.target

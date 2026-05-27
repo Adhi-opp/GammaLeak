@@ -1,0 +1,6 @@
+[Unit]
+Description=Stop GammaLeak engine after market close
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl stop gammaleak.service

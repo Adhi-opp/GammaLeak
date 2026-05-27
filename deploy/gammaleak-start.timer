@@ -1,0 +1,12 @@
+[Unit]
+Description=Start GammaLeak engine at 09:13 IST on weekdays
+
+[Timer]
+# 09:13 gives the engine 2 min to boot, resolve instruments, prefetch prior
+# closes, and start receiving the first ticks before market opens at 09:15 IST.
+OnCalendar=Mon..Fri 09:13:00 Asia/Kolkata
+Persistent=true
+Unit=gammaleak.service
+
+[Install]
+WantedBy=timers.target

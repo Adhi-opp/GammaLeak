@@ -1,0 +1,22 @@
+[Unit]
+Description=GammaLeak market-data engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/gammaleak
+EnvironmentFile=/opt/gammaleak/.env
+ExecStart=/opt/gammaleak/.venv/bin/python web_server.py --port 8080
+Restart=on-failure
+RestartSec=15
+
+# Hardening (optional — comment out if any of these block legitimate disk writes).
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

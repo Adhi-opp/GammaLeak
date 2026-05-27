@@ -1,0 +1,9 @@
+# /etc/cron.d/gammaleak-heartbeat
+# Touches a logfile every hour so Oracle Always Free's idle-reaping monitor
+# sees continuous activity and doesn't preempt the instance during weekends
+# or holidays when the engine itself is stopped.
+#
+# Install:  sudo cp deploy/heartbeat.cron /etc/cron.d/gammaleak-heartbeat
+#           sudo chmod 644 /etc/cron.d/gammaleak-heartbeat
+
+0 * * * * ubuntu /usr/bin/uptime >> /var/log/gammaleak-heartbeat.log 2>&1
