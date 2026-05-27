@@ -2,18 +2,21 @@
 
 Single-instance deployment of the engine + browser dashboard on an Oracle
 Cloud ARM Ampere "Always Free" instance, auto-started by systemd timers,
-reachable from anywhere via Cloudflare Tunnel. No public IP exposure.
+reachable from your own devices via Tailscale's private mesh network.
+No public IP exposure, no paid domain required.
 
 **Operational profile**: Engine starts 09:13 IST, stops 15:35 IST, Mon–Fri.
 Zero daily manual touch as long as the Upstox token remains valid (in
 practice: generate once, lasts until Upstox invalidates).
+
+**Total recurring cost: ₹0.** Oracle Always Free + Tailscale free tier.
 
 ---
 
 ## Prerequisites
 
 - Oracle Cloud account with **Always Free** tier enabled.
-- Cloudflare account + a domain (free tier; ~$8/yr for the cheapest TLD).
+- Tailscale account (free for personal use, up to 100 devices / 3 users).
 - Working Upstox API credentials + a valid access token in `.env`.
 
 ---
@@ -100,41 +103,65 @@ slots on the next weekday.
 
 ---
 
-## Step 6 — Cloudflare Tunnel (dashboard access from anywhere)
+## Step 6 — Tailscale (private mesh for dashboard access)
 
-One-time setup, then runs as a service forever.
+Tailscale puts the Oracle instance, your laptop, and your phone on
+a private virtual network. You access the dashboard at a stable
+hostname (e.g. `http://gammaleak:8080`) from any of your devices,
+anywhere in the world. **No public exposure, no domain required.**
+
+### On the Oracle instance (one-time)
 
 ```bash
-# Install cloudflared (ARM64 build)
-curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb -o /tmp/cf.deb
-sudo dpkg -i /tmp/cf.deb
-
-# Authenticate with your Cloudflare account (opens a browser link — paste it locally)
-cloudflared tunnel login
-
-# Create the tunnel
-cloudflared tunnel create gammaleak
-
-# Route a hostname to it (requires the domain to be on Cloudflare DNS)
-cloudflared tunnel route dns gammaleak dash.yourdomain.com
-
-# Drop the config (replace <TUNNEL_UUID> with the value from `tunnel create`)
-sudo mkdir -p /etc/cloudflared
-sudo cp /opt/gammaleak/deploy/cloudflared-config.yml /etc/cloudflared/config.yml
-sudo nano /etc/cloudflared/config.yml   # fill in TUNNEL_UUID + hostname
-
-# Install + start as a system service
-sudo cloudflared service install
-sudo systemctl enable --now cloudflared
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up --hostname=gammaleak
+# Opens a one-time auth URL — paste it into a browser, sign in with
+# Google / GitHub / email, approve the device. Done.
 ```
 
-The dashboard is now reachable at `https://dash.yourdomain.com` from
-anywhere — phone, laptop, public Wi-Fi — **with no inbound ports open
-on the Oracle instance.**
+Verify:
 
-Optional but recommended: enable **Cloudflare Access** (Zero Trust) on
-the hostname in the Cloudflare dashboard so only your email can load the
-page. Free for up to 50 users.
+```bash
+tailscale status         # should show 'gammaleak' as one of your nodes
+tailscale ip -4          # the 100.x.x.x address assigned to this node
+```
+
+### On your devices (each one-time, ~30s)
+
+- **Phone**: install "Tailscale" from App Store / Play Store, sign in
+  with the same account, toggle the VPN on.
+- **Laptop**: install Tailscale from <https://tailscale.com/download>
+  (Windows / macOS / Linux), sign in, toggle on.
+
+That's it. From any of those devices, open one of:
+
+- `http://gammaleak:8080`           (MagicDNS — works after a few seconds)
+- `http://100.x.x.x:8080`           (the tailnet IP, always works)
+
+…and you have the dashboard. From anywhere. No DNS to configure, no
+ports exposed publicly, no domain to buy.
+
+### Security note
+
+Only devices signed in to YOUR Tailscale account can reach the
+dashboard. Tailscale's free tier supports up to 100 devices and 3
+users — more than enough for personal use. If you ever want to share
+read-only access with another trader, invite them as a user and use
+Tailscale ACLs to restrict what they can hit.
+
+### Optional: a public URL too
+
+If you ever need a *public* URL (to share with someone who isn't on
+your tailnet), use Cloudflare's free `trycloudflare.com` random-URL
+tunnel as a one-off:
+
+```bash
+sudo apt install -y cloudflared
+cloudflared tunnel --url http://localhost:8080
+# Prints a random https://*.trycloudflare.com URL valid until you kill it
+```
+
+No account, no domain, no commitment. URL dies when you Ctrl-C.
 
 ---
 
@@ -161,7 +188,8 @@ Writer task started, logging to logs/YYYY-MM-DD/
 ```
 
 Then `curl http://localhost:8080/` should return the dashboard HTML.
-Open `https://dash.yourdomain.com` in a browser — full dashboard.
+From a Tailscale-connected device, open `http://gammaleak:8080` —
+full dashboard should load.
 
 If everything is good: `sudo systemctl stop gammaleak.service`. The
 timers will take over from tomorrow's 09:13 IST automatically.
@@ -186,7 +214,8 @@ This appends `uptime` to `/var/log/gammaleak-heartbeat.log` every hour
 ## Daily ops
 
 **Nothing.** The engine starts 09:13 IST every weekday, stops 15:35,
-dashboard is always at `dash.yourdomain.com`.
+dashboard is always at `http://gammaleak:8080` from any of your
+Tailscale-connected devices.
 
 ## Weekly / monthly ops
 
@@ -220,7 +249,9 @@ else needed (token is read on each engine boot).
 | Timer fires but service immediately exits | `.env` missing or unreadable | `ls -l /opt/gammaleak/.env` — should be `-rw------- ubuntu` |
 | WebSocket connects but no ticks | Token invalidated server-side | Re-run Step 4 push |
 | Dashboard loads but no data | Engine not running (timer didn't fire) | `systemctl list-timers gammaleak-*` to confirm next-fire time |
-| Cloudflare tunnel returns 502 | Engine not running | Same as above |
+| `http://gammaleak:8080` doesn't resolve | MagicDNS not propagated yet | Wait 30s after first `tailscale up`, or use the `100.x.x.x` IP from `tailscale ip -4` |
+| Tailscale shows node as offline | Oracle instance asleep or `tailscaled` not running | `sudo systemctl restart tailscaled` on Oracle |
+| Dashboard times out via Tailscale | Engine not running | `systemctl list-timers gammaleak-*` to confirm next-fire time |
 | journalctl shows BSE_FO subscribe errors | Upstox account doesn't have BSE F&O scope | Non-fatal warning — engine boots without SENSEX_FUT card |
 | Disk full | Logs accumulated | Run the `find ... -mtime +90 -delete` from above |
 
@@ -230,9 +261,12 @@ else needed (token is read on each engine boot).
 
 - **Zero daily touch** during normal weeks.
 - **~30 second monthly touch** when the token dies (push a fresh `.env`).
-- **Dashboard always at one stable URL** — `https://dash.yourdomain.com`.
-- **No public port exposure** — tunnel is outbound-only; Oracle's only
-  inbound port is SSH on 22.
+- **Dashboard at a stable hostname** — `http://gammaleak:8080` from any
+  of your Tailscale-connected devices (phone / laptop / anywhere).
+- **No public port exposure** — Oracle's only inbound port is SSH 22;
+  Tailscale uses outbound-only connections to its coordination server.
+- **₹0 recurring cost** — Oracle Always Free + Tailscale free tier, no
+  domain to purchase or renew.
 - **Full version-controlled deploy recipe** — this file + the units in
   `deploy/`. Next time you spin up an instance (or someone asks how
   you deployed it) the exact steps are in-repo.
