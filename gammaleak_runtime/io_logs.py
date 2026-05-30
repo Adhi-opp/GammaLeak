@@ -60,7 +60,7 @@ def get_events_log_path(trading_day: date | None = None) -> Path:
 def append_event_row(
     timestamp: float, symbol: str, event_type: str, side: int,
     z_score: float, ltp: float, regime: str = "", setup_label: str = "",
-    conviction: int = 0,
+    conviction: int = 0, conv_factors: str = "",
 ) -> None:
     """Append one sig_state transition to logs/YYYY-MM-DD_events.csv.
 
@@ -75,6 +75,7 @@ def append_event_row(
     row = (
         f"{timestamp:.3f}", ts_ist, symbol, event_type, str(side),
         f"{z_score:.4f}", f"{ltp:.4f}", regime, setup_label, str(conviction),
+        conv_factors,
     )
     with path.open("a", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)

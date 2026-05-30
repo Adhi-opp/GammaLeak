@@ -1172,28 +1172,46 @@ def compute_conviction_score(
     hurst_threshold: float,
     drift_dir: int,
 ) -> int:
-    """1–5 conviction score for a fade signal.
-    +1 base, +1 exhaustion-grade Z, +1 regime supports fade (not trending),
-    +1 drift aligns with fade direction (side opposes drift), +1 OI flow alignment."""
-    score = 1
-    if abs_z >= exhaustion_peak:
-        score += 1
-    # Fade plays work best when regime is NOT trending
-    if state.efficiency_ratio < er_threshold and state.hurst < hurst_threshold:
-        score += 1
-    # Drift aligned with fade direction: fade side = -Z-side, so fade is "against stretch"
-    # The fade trade is: side == -alert_side (we fade the +Z stretch by going SHORT = side -1)
-    # drift_dir aligning with FADE direction means drift_dir == -side
-    if drift_dir != 0 and side != 0 and drift_dir == -side:
-        score += 1
-    # OI flow alignment (only meaningful for index symbols with OI data)
+    """Weighted 1–5 conviction for a fade signal.
+
+    score = 1 + Σ weight(active factor), capped to [1, 5]. Weights live in
+    CONVICTION_FACTOR_WEIGHTS (config) and are re-derivable from each factor's
+    realised MFE lift by calibrate.py — the old flat +1-per-factor was
+    non-predictive (conv-4 underperformed conv-3). The active-factor tags are
+    stashed on state.conviction_factors so the CONFIRM event logs them and the
+    grader can measure per-factor lift going forward.
+
+    `side` is the stretch side (alert_side); the fade trade is the opposite.
+    """
     flow = state.oi_flow_label or ""
-    if side > 0 and flow in ("NEW SHORTS", "LONG EXIT"):
-        # Fade SHORT on positive Z: want writers/shorts building
-        score += 1
-    elif side < 0 and flow in ("NEW LONGS", "SHORT COVER"):
-        # Fade LONG on negative Z: want longs/covering building
-        score += 1
+    dl = state.divergence_label or ""
+    ab = state.absorption_label or ""
+
+    factors: list[str] = []
+    # EXH — exhaustion-grade stretch (|peak_z| past the exhaustion threshold).
+    if abs_z >= exhaustion_peak:
+        factors.append("EXH")
+    # CHOP — fade-friendly regime: neither ER nor Hurst trending.
+    if state.efficiency_ratio < er_threshold and state.hurst < hurst_threshold:
+        factors.append("CHOP")
+    # DRIFT — 5-min drift points the fade's way (drift opposes the stretch side).
+    if drift_dir != 0 and side != 0 and drift_dir == -side:
+        factors.append("DRIFT")
+    # OIF — OI flow agrees with the fade (writers/exits building on the stretch).
+    if (side > 0 and flow in ("NEW SHORTS", "LONG EXIT")) or \
+       (side < 0 and flow in ("NEW LONGS", "SHORT COVER")):
+        factors.append("OIF")
+    # DIV — CVD divergence agrees with the fade (futures only; spot has no CVD).
+    if (side > 0 and dl in ("BUYER_EXHAUSTION", "BUY_ABSORPTION")) or \
+       (side < 0 and dl in ("SELLER_EXHAUSTION", "SELL_ABSORPTION")):
+        factors.append("DIV")
+    # OFI — Phase-1 order-flow-imbalance absorption agrees (weight 0 until proven).
+    if (side > 0 and ab in ("BEAR_ABSORB", "BULL_VOID")) or \
+       (side < 0 and ab in ("BULL_ABSORB", "BEAR_VOID")):
+        factors.append("OFI")
+
+    score = 1 + sum(CONVICTION_FACTOR_WEIGHTS.get(f, 0) for f in factors)
+    state.conviction_factors = ",".join(factors)
     return min(5, max(1, score))
 
 
@@ -1948,6 +1966,7 @@ def update_signal_engine(
                 z_score=state.z_score, ltp=state.ltp,
                 regime=state.regime, setup_label=state.setup_label or "",
                 conviction=state.conviction_score,
+                conv_factors=(state.conviction_factors if evt == "CONFIRM" else ""),
             )
         except Exception:
             pass

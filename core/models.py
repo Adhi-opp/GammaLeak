@@ -128,6 +128,7 @@ class SymbolState:
     last_alert_fire_ts: float | None = None   # when sig_state last transitioned 0→1
     last_alert_fire_side: int = 0              # side of that alert, for same-side block
     conviction_score: int = 0                  # 1–5 strength of the currently-displayed signal
+    conviction_factors: str = ""               # comma-joined active factors at CONFIRM (e.g. "EXH,DIV") — logged for lift calibration
     setup_label: str = ""                      # named setup (e.g. "VWAP RECLAIM L")
     event_blackout_reason: str = ""            # non-empty if current tick is in a scheduled blackout
 

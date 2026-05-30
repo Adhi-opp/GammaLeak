@@ -1,0 +1,13 @@
+[Unit]
+Description=Nightly GammaLeak gate calibration at 16:00 IST on weekdays
+
+[Timer]
+# 16:00 IST = 25min after the 15:35 engine stop. Enough slack for the final
+# events.csv flush. Weekdays only — no new outcomes accrue on weekends, so
+# re-running would just rewrite calibration.py with the same numbers.
+OnCalendar=Mon..Fri 16:00:00 Asia/Kolkata
+Persistent=true
+Unit=gammaleak-calibrate.service
+
+[Install]
+WantedBy=timers.target

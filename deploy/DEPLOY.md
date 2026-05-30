@@ -86,20 +86,31 @@ The `.env` should contain `UPSTOX_API_KEY`, `UPSTOX_API_SECRET`,
 ## Step 5 — Install systemd units
 
 ```bash
-sudo cp /opt/gammaleak/deploy/gammaleak.service       /etc/systemd/system/
-sudo cp /opt/gammaleak/deploy/gammaleak-stop.service  /etc/systemd/system/
-sudo cp /opt/gammaleak/deploy/gammaleak-start.timer   /etc/systemd/system/
-sudo cp /opt/gammaleak/deploy/gammaleak-stop.timer    /etc/systemd/system/
+sudo cp /opt/gammaleak/deploy/gammaleak.service           /etc/systemd/system/
+sudo cp /opt/gammaleak/deploy/gammaleak-stop.service      /etc/systemd/system/
+sudo cp /opt/gammaleak/deploy/gammaleak-start.timer       /etc/systemd/system/
+sudo cp /opt/gammaleak/deploy/gammaleak-stop.timer        /etc/systemd/system/
+sudo cp /opt/gammaleak/deploy/gammaleak-calibrate.service /etc/systemd/system/
+sudo cp /opt/gammaleak/deploy/gammaleak-calibrate.timer   /etc/systemd/system/
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now gammaleak-start.timer gammaleak-stop.timer
+sudo systemctl enable --now gammaleak-start.timer gammaleak-stop.timer \
+                            gammaleak-calibrate.timer
 
-# Verify both timers are registered
+# Verify all three timers are registered
 systemctl list-timers gammaleak-*
 ```
 
-Expected output: two timers with next-fire times in the IST 09:13 / 15:35
-slots on the next weekday.
+Expected output: three timers with next-fire times in the IST 09:13 / 15:35 /
+16:00 slots on the next weekday. The 16:00 one re-derives the regime gate from
+the day's graded outcomes (rewrites `core/calibration.py`); tomorrow's 09:13
+boot picks it up automatically via `core/config.py`'s merge — no restart needed.
+
+Run it by hand any time to see the current table without writing the file:
+
+```bash
+cd /opt/gammaleak && .venv/bin/python calibrate.py --dry-run
+```
 
 ---
 

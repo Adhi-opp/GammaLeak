@@ -62,6 +62,9 @@ LOG_COLUMNS = REQUIRED_LOG_COLUMNS + (
 EVENT_LOG_COLUMNS = (
     "timestamp", "timestamp_ist", "symbol", "event_type", "side",
     "z_score", "ltp", "regime", "setup_label", "conviction",
+    # Phase 2: comma-joined active conviction factors (e.g. "EXH,DIV") at the
+    # CONFIRM. Lets calibrate.py measure each factor's MFE lift and re-weight.
+    "conv_factors",
 )
 # Per-sample snapshot of the OI Flow Anchored Velocity Chart's underlying
 # state. Persisting these lets us retroactively verify "did spot bounce off
@@ -409,10 +412,45 @@ UPSTOX_CURRENCY_UNDERLYINGS = ("USDINR", "EURINR", "GBPINR", "JPYINR")
 #
 # Tuple format: (setup_label_exact, regime_substring, action).
 # action ∈ {"BLOCK", "REQUIRE_CONV_<n>"}
-SETUP_REGIME_RULES: list[tuple[str, str, str]] = [
+#
+# HAND_REGIME_RULES is the fallback used when core/calibration.py is absent or a
+# (setup, regime) pair is too thin for the nightly grader to have jurisdiction.
+# The effective SETUP_REGIME_RULES is the merge (see _merge_regime_rules).
+# Source of the hand rules: 4-day window 2026-05-19..22 — kept only as a floor;
+# `python calibrate.py` re-derives the live table from all sessions' outcomes.
+HAND_REGIME_RULES: list[tuple[str, str, str]] = [
     ("ORB BREAK L",      "NORMAL", "BLOCK"),
     ("EXHAUSTION REV S", "NORMAL", "REQUIRE_CONV_4"),
 ]
+
+
+def _merge_regime_rules() -> list[tuple[str, str, str]]:
+    """Effective gate = hand rules, with calibrate.py taking over any pair it has
+    jurisdiction over (>= MIN_SAMPLE_GATE outcomes).
+
+    The merge is asymmetric — tighten aggressively, relax conservatively:
+      - CALIBRATED_REGIME_RULES (BLOCK/REQUIRE) replace/add, when the grader has
+        a clear underperformer with enough sample.
+      - CALIBRATED_RELAX drops a hand rule ONLY for a setup that cleanly recovered
+        (>=40% on >= MIN_SAMPLE_GATE outcomes) — e.g. EXHAUSTION REV S climbing
+        from 26% to 54%. A merely mediocre setup never auto-undoes a human block.
+      - Pairs the grader can't speak to (thin / WATCH band) keep the hand rule.
+    """
+    effective: dict[tuple[str, str], str] = {
+        (s, r): a for s, r, a in HAND_REGIME_RULES
+    }
+    try:
+        from core.calibration import CALIBRATED_REGIME_RULES, CALIBRATED_RELAX
+    except Exception:
+        return [(s, r, a) for (s, r), a in effective.items()]
+    for pair in CALIBRATED_RELAX:
+        effective.pop(tuple(pair), None)          # recovered setup — un-gate it
+    for s, r, a in CALIBRATED_REGIME_RULES:
+        effective[(s, r)] = a
+    return [(s, r, a) for (s, r), a in effective.items()]
+
+
+SETUP_REGIME_RULES: list[tuple[str, str, str]] = _merge_regime_rules()
 
 
 def evaluate_regime_gate(setup_label: str, regime: str, conviction: int) -> tuple[bool, str]:
@@ -434,6 +472,47 @@ def evaluate_regime_gate(setup_label: str, regime: str, conviction: int) -> tupl
                     return False, f"{rule_setup}|{rule_regime}|CONV<{required}"
             break
     return True, ""
+
+
+# --------------------------- CONVICTION FACTOR WEIGHTS ---------------------------
+# The 1–5 conviction score is base 1 + the summed weight of each active factor,
+# capped to [1, 5] (see compute_conviction_score). Flat +1-per-factor was found
+# non-predictive (conv-4 hit 42% vs conv-3's 50% over 8 sessions) — the score
+# only means something if the weights track each factor's realised MFE lift.
+#
+# HAND defaults carry the 2026-05-31 first-pass lift read; calibrate.py overrides
+# any factor it has enough sample to measure (>= MIN_FACTOR_SAMPLE present AND
+# absent). Factor keys match the tags compute_conviction_score emits into
+# events.csv's conv_factors column.
+HAND_CONVICTION_WEIGHTS: dict[str, int] = {
+    "EXH":   2,   # |peak_z| >= exhaustion_peak — measured +21 lift (n=99), dominant
+    "DIV":   1,   # CVD divergence aligns with the fade — measured +12 lift (n=46)
+    "CHOP":  1,   # ER & Hurst both non-trending (fade-friendly) — weak +3, kept
+    "OIF":   1,   # OI flow aligns with fade side — not yet instrumented, kept neutral
+    "DRIFT": 1,   # 5-min drift opposes the stretch — suspected weak; instrumented now
+    "OFI":   0,   # Phase-1 OFI absorption aligns — instrumented, off until validated
+}
+
+
+def _merge_conviction_weights() -> dict[str, int]:
+    """HAND weights, with calibrate.py overriding any factor it has measured.
+
+    Pure lift-derived (hit-with-factor minus hit-without, graded against the
+    fixed MFE floor) so — unlike the floors — this is non-circular and safe to
+    auto-apply. Factors the grader hasn't instrumented enough keep their hand
+    weight. Regenerate with: python calibrate.py
+    """
+    weights = dict(HAND_CONVICTION_WEIGHTS)
+    try:
+        from core.calibration import CALIBRATED_CONVICTION_WEIGHTS
+    except Exception:
+        return weights
+    for factor, w in CALIBRATED_CONVICTION_WEIGHTS.items():
+        weights[factor] = int(w)
+    return weights
+
+
+CONVICTION_FACTOR_WEIGHTS: dict[str, int] = _merge_conviction_weights()
 
 
 # --------------------------- OI FLOW TIMELINE ---------------------------

@@ -1,0 +1,15 @@
+[Unit]
+Description=Re-derive the GammaLeak regime gate from the day's graded outcomes
+# Runs after the engine has stopped and the disk-writer has flushed the final
+# events.csv, so the day just traded is included in the calibration.
+After=gammaleak-stop.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/opt/gammaleak
+# Regenerates core/calibration.py in place. The next engine boot (tomorrow's
+# 09:13 timer) imports the fresh table via core/config.py's merge — no restart
+# of anything else required. Non-zero exit (e.g. no logs yet) is non-fatal.
+ExecStart=/opt/gammaleak/.venv/bin/python calibrate.py
+SuccessExitStatus=0 1
