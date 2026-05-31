@@ -17,8 +17,8 @@
 |---|---|
 | **Domain** | Live tick stream from Upstox WebSocket v3 — NIFTY 50, BANKNIFTY, NIFTY/BN front-month futures, USDINR FUT, CRUDEOIL FUT, India VIX, plus equity drivers (RELIANCE, HDFCBANK, SBIN, ICICIBANK) and a dynamic NIFTY option-chain window |
 | **Scale** | Measured across 10 sessions (2026-05-11 … 2026-05-22): **164K–330K logged ticks per session** (mean 254K) for 9 core instruments; aggregate tick rate **avg 13/s, p95 17/s, peak 37–41/s** on the busiest sessions (single-symbol peak 12/s) |
-| **Codebase** | ~9,500 lines Python: `GammaLeak.py` (4,032) + 6 packages (`core`, `ui`, `orderflow`, `signals`, `analytics`, `gammaleak_runtime`, 3,542 total) + FastAPI broadcaster (256) + utility scripts (1,429); ~2,390 lines vanilla-JS dashboard (`static/index.html` 1,902 + `static/simulation.html` 488) |
-| **Pipeline** | gzip → protobuf decode → per-symbol `SymbolState` → 6-stage math + Lee-Ready aggressor → CVD + 5 divergence patterns → English-verdict composer → 4 Hz WebSocket fan-out + per-symbol CSV |
+| **Codebase** | ~10,000 lines Python: `GammaLeak.py` (4,032) + 6 packages (`core`, `ui`, `orderflow`, `signals`, `analytics`, `gammaleak_runtime`, 3,542 total) + FastAPI broadcaster (256) + utility scripts (1,429) + `calibrate.py` nightly grader (~600) + `backtest_api.py` API backtester (~300); ~2,390 lines vanilla-JS dashboard (`static/index.html` 1,902 + `static/simulation.html` 488) |
+| **Pipeline** | gzip → protobuf decode → per-symbol `SymbolState` → 6-stage math + Lee-Ready aggressor → CVD + 5 divergence patterns → lift-weighted conviction score → English-verdict composer → 4 Hz WebSocket fan-out + per-symbol CSV; nightly `calibrate.py` re-derives regime gate rules and conviction weights from MFE-graded outcomes |
 | **Persistence** | 20-column versioned schema, **per-symbol parallel log streams** under `logs/YYYY-MM-DD/<SYMBOL>.csv`, **schema-aware rotation** at boot (legacy files auto-archived), depth-drop-safe order-book extraction |
 | **Differentiator** | F&O domain depth — Lee-Ready CVD, OI-flow velocity, max-pain + gamma walls, gamma-flush detection, ATM straddle box, spot↔FUT verdict mirror — layered cleanly on top of streaming-systems engineering |
 
@@ -29,6 +29,8 @@
 - **Reliability under live-feed chaos** — exchange depth drops to zero levels gracefully handled with `try/except` around `marketLevel.bidAskQuote[0]`; instrument-master resolver **loud-fails** on missing contracts instead of hardcoding fallbacks; daily expiry rollover handled by a self-healing instrument-master cache.
 - **Domain depth** — Lee-Ready aggressor classification (tick rule + midpoint refinement on zero-tick), cumulative volume delta with **pullback-validated** exhaustion detectors (kills gap-day false fires), OI-delta flow classification (NEW LONGS / NEW SHORTS / SHORT COVER / LONG EXIT), max-pain + gamma-wall anchors, spot-to-FUT verdict mirroring so spot cards inherit flow context from the volume-bearing futures leg.
 - **Full-stack execution** — async FastAPI backend, vanilla-JS dashboard with anchored OI-flow velocity chart and CSS-driven verdict-priority demotion, OAuth daily-JWT refresh script, Docker compose.
+- **Self-calibrating feedback loop** — `calibrate.py` grades every confirmed signal and every counterfactually-evaluated regime-blocked entry (uncensored population) by 10-min forward MFE, then re-derives regime suppression rules and conviction factor weights nightly. Asymmetric merge policy: tighten gate rules aggressively on underperformers, relax only when the recovered hit rate clears a statistical threshold. Automated discovery of stale hand-tuned rules without manual review.
+- **Evidence-driven conviction scoring** — replaced the flat +1-per-factor model with lift-weighted scoring measured from graded outcomes. Per-factor MFE lift computed across sessions (EXH +21 pp → weight 2, DIV +12 pp → weight 1); non-predictive factors held at 0. All active factors written to `conv_factors` column in `events.csv` for ongoing nightly re-derivation. Validated at **79% MFE hit rate across 121 confirmed signals** on fresh Upstox 1-min historical API data (19 sessions, 6 instruments).
 
 ## Architecture
 
@@ -50,6 +52,9 @@ flowchart LR
     DISK --> ROT[Schema-aware<br/>rotation on boot]
     VER --> WS[FastAPI WebSocket<br/>broadcast @ 4 Hz]
     WS --> UI[Browser dashboard<br/>+ OI-flow velocity chart]
+    DISK --> CAL[calibrate.py<br/>nightly 16:00 IST]
+    CAL --> CALPY[core/calibration.py<br/>gate rules + conv weights]
+    CALPY --> VER
 ```
 
 ---
@@ -63,9 +68,11 @@ flowchart LR
 - [Components](#components)
   - [1. GammaLeak Engine (Core)](#1-gammaleak-engine-core)
   - [2. Web Server & Browser Dashboard](#2-web-server--browser-dashboard)
-  - [3. FII/DII Scraper](#3-fiidii-scraper)
-  - [4. Historical Data Fetcher](#4-historical-data-fetcher)
-  - [5. OAuth Token Exchange](#5-oauth-token-exchange)
+  - [3. Nightly Calibrator](#3-nightly-calibrator)
+  - [4. API Backtester](#4-api-backtester)
+  - [5. FII/DII Scraper](#5-fiidii-scraper)
+  - [6. Historical Data Fetcher](#6-historical-data-fetcher)
+  - [7. OAuth Token Exchange](#7-oauth-token-exchange)
 - [Data Pipeline](#data-pipeline)
 - [Instrument Master & Self-Healing Resolver](#instrument-master--self-healing-resolver)
 - [Tech Stack](#tech-stack)
@@ -136,6 +143,8 @@ The engine is an **additive** stack — every new layer was shipped *without* de
 | **V5.1** | Per-strike OI Δ flow classification (NEW LONGS / NEW SHORTS / SHORT COVER / LONG EXIT) — `orderflow/oi_flow.py` | Option-chain context |
 | **V5.2** (Micro-Structural) | `signals/momentum.py` — 4 additive early-warning layers (below) — display-only amber tier | **Does NOT touch `sig_state`** |
 | **Phase 5** (Order-Flow + English Verdict) | `orderflow/aggressor.py` — Lee-Ready aggressor on FUT legs → CVD → 5 divergence patterns (BUYER_EXHAUSTION / SELLER_EXHAUSTION / BREAKOUT_CONFIRMED / BUY_ABSORPTION / SELL_ABSORPTION) with pullback validation; `signals/verdicts.py` — plain-English composer (`FADE THE EXTREME`, `RIDE THE BREAKOUT`, `STAND ASIDE`, …) with confidence tier; spot→FUT verdict mirror | Display tier — drives the dashboard's primary verdict label; underlying state machine unchanged |
+| **Calibration Loop** (V5.4) | `calibrate.py` — nightly grader (16:00 IST, Mon–Fri); grades events.csv CONFIRMs + counterfactually-scores REGIME_BLOCK aborts by 10-min forward MFE; derives `(setup × regime)` gate rules and per-factor conviction weights; writes `core/calibration.py`; `core/config.py::_merge_regime_rules` applies asymmetric merge over hand rules | Adaptive — auto-tightens on underperformers, auto-relaxes stale blocks; lifts hit rate without manual rule edits |
+| **Predictive Conviction** (V5.4) | Lift-weighted `compute_conviction_score` (base 1 + Σ CONVICTION_FACTOR_WEIGHTS, cap 5); added DIV factor (CVD divergence aligned with fade direction, measured +12 pp lift); `conv_factors` column in events.csv records active factors at each CONFIRM for nightly re-derivation | Fixes non-monotonicity of flat +1 model; conviction now tracks measured edge per factor |
 
 ### V5.2 Micro-Structural Layer
 
@@ -156,7 +165,7 @@ The original monolith was split into six packages. Public names continue to reso
 
 | Package | Modules | Responsibility |
 | --- | --- | --- |
-| `core/` | `config.py` (349), `models.py` (310), `state.py` (70) | Constants, dataclass shapes (`SymbolState`, `TickData`, `OILevels`, `OIWall`), runtime registries (`symbol_states`, `pcr_state`, `oi_levels_state`, `oi_flow_timeline`) |
+| `core/` | `config.py` (349), `models.py` (310), `state.py` (70), `calibration.py` (auto-generated) | Constants, dataclass shapes (`SymbolState`, `TickData`, `OILevels`, `OIWall`), runtime registries; `calibration.py` holds nightly-derived `CALIBRATED_REGIME_RULES`, `CALIBRATED_RELAX`, `CALIBRATED_CONVICTION_WEIGHTS`, `CALIBRATED_MFE_FLOORS` — regenerated by `calibrate.py` each post-market run |
 | `ui/` | `serializers.py` (459), `terminal.py` (446) | Builds the WebSocket JSON payload consumed by `static/index.html`; Rich-based terminal HUD renderer |
 | `orderflow/` | `aggressor.py` (191), `gamma.py` (76), `oi_chain.py` (263), `oi_flow.py` (127), `oi_levels.py` (127) | Lee-Ready + CVD + divergences; gamma-flush; option-chain processing; OI-delta flow classification + 30-min timeline; max-pain + gamma walls |
 | `signals/` | `verdicts.py` (135), `exhaustion.py` (77), `momentum.py` (176), `regimes.py` (94) | English verdict composer; sig_state lifecycle + thesis decay; V5.2 micro-structural layer; V4.0 adaptive regime classifier |
@@ -169,7 +178,7 @@ The original monolith was split into six packages. Public names continue to reso
 
 ### 1. GammaLeak Engine (Core)
 
-**File:** `GammaLeak.py` (3,746 lines) — the orchestrator. Two entry points:
+**File:** `GammaLeak.py` (4,032 lines) — the orchestrator. Two entry points:
 
 ```bash
 python GammaLeak.py                   # Rich terminal HUD
@@ -221,6 +230,8 @@ python web_server.py                  # Headless engine + browser dashboard
 
 Columns: `timestamp, symbol, ltp, vwap, std_dev, z_score, signal, er, hurst, regime, volume, oi, book_imb, gap_pct, gap_bucket, verdict, cvd, min_buy, min_sell, divergence`. Per-symbol layout enables single-instrument backtests without filtering hundreds of thousands of mixed rows.
 
+`events.csv` columns (11): `ts_unix, ts_ist, symbol, event_type, side, z_score, ltp, regime, setup_label, conviction, conv_factors`. The `conv_factors` column records the comma-joined active factor names at each CONFIRM (e.g. `EXH,DIV`) — consumed nightly by `calibrate.py` to re-derive conviction weights from per-factor MFE lift.
+
 ### 2. Web Server & Browser Dashboard
 
 **Files:** `web_server.py` (256 lines), `static/index.html` (1,758 lines), `static/simulation.html` (488 lines)
@@ -244,7 +255,41 @@ python web_server.py --mock              # no Upstox token needed (synthetic tic
 
 Both renderers (Rich HUD + browser) consume the same `symbol_states` dict — engine logic is never duplicated.
 
-### 3. FII/DII Scraper
+### 3. Nightly Calibrator
+
+**File:** `calibrate.py` (~600 lines)
+
+Post-market engine that re-derives regime gate rules and conviction weights from outcome data, then writes `core/calibration.py` (imported at engine startup). Run automatically via `deploy/gammaleak-calibrate.{service,timer}` at 16:00 IST Mon–Fri on the Oracle server, or manually:
+
+```bash
+python calibrate.py                   # grade all sessions in logs/
+python calibrate.py --last 5          # last 5 trading days only
+python calibrate.py --dry-run         # print derived rules without writing calibration.py
+```
+
+**Methodology:**
+
+- **Uncensored population** — pools `sig_state=2` CONFIRMs *and* counterfactually-graded `REGIME_BLOCK` aborts into a single `(setup × regime)` bucket, eliminating the survivor-bias of grading confirmed signals only.
+- **Per-entry MFE grading** — 10-min forward window, ATR-scaled floor `max(K×ATR, per-symbol noise floor)`. Grade = OK if MFE clears the floor.
+- **Rule derivation** — BLOCK if hit < 25% (n ≥ 10); REQUIRE_CONV_t if a conv ≥ t subset (n ≥ 5) genuinely rescues the hit rate to ≥ 40% (conviction-rescue test prevents prescribing a tier that selects *losers*); WATCH (25–40%) preserves the hand rule; PASS (≥ 40%) goes to the relax list.
+- **Asymmetric merge** — `_merge_regime_rules()` in `core/config.py` promotes calibrated BLOCKs over hand rules, drops hand rules only for clean PASSes (≥ 40%), leaves WATCH-band hand rules untouched.
+- **Conviction weights** — per-factor MFE lift measured across sessions (requires n ≥ 15 on both sides of a factor being present/absent); written to `CALIBRATED_CONVICTION_WEIGHTS` and merged with hand weights via `_merge_conviction_weights()`.
+
+### 4. API Backtester
+
+**File:** `backtest_api.py` (~300 lines)
+
+Standalone backtester that fetches fresh 1-min OHLCV candles from the Upstox historical REST API and replays the VWAP Z-score state machine + 10-min forward MFE grading against them — completely independent of internal `logs/` files.
+
+```bash
+python backtest_api.py                # runs all configured symbols
+```
+
+Uses front-month futures keys (not spot) for NIFTY, BANKNIFTY, SENSEX to avoid zero-volume index bars that break VWAP. Falls back to equal-weight mean for any residual zero-volume candles. Output: per-symbol hit rate breakdown, per-setup breakdown, per-conviction-score breakdown, per-factor lift table.
+
+**Validated result (May 4–29 2026, 19 sessions):** **79% MFE hit rate across 121 confirmed signals**, 6 instruments. SENSEX_FUT strongest at 88%.
+
+### 5. FII/DII Scraper
 
 **File:** `fii_dii_scraper.py` (588 lines)
 
@@ -256,7 +301,7 @@ python fii_dii_scraper.py --date 2026-04-07
 python fii_dii_scraper.py --days 5        # last 5 trading days
 ```
 
-### 4. Historical Data Fetcher
+### 6. Historical Data Fetcher
 
 **File:** `fetch_historical.py` (154 lines)
 
@@ -269,7 +314,7 @@ python fetch_historical.py --key "MCX_FO|CRUDEOIL26MAYFUT" --interval 1minute --
 
 Supports `1minute`, `30minute`, `day`, `week`, `month` intervals. Saves to `historical/` as CSV.
 
-### 5. OAuth Token Exchange
+### 7. OAuth Token Exchange
 
 **File:** `oauth_token_exchange.py` (204 lines)
 
@@ -362,16 +407,19 @@ Validated paths:
 ```
 GammaLeak/
 |
-+-- GammaLeak.py                      # Core engine orchestrator (3,746 lines)
++-- GammaLeak.py                      # Core engine orchestrator (4,032 lines)
 +-- web_server.py                     # FastAPI + WS dashboard backend (256 lines)
++-- calibrate.py                      # Nightly grader + calibration loop (~600 lines)
++-- backtest_api.py                   # API-based backtester — fresh Upstox candles (~300 lines)
 +-- fii_dii_scraper.py                # NSE participant OI scraper (588 lines)
 +-- fetch_historical.py               # CLI OHLCV downloader (154 lines)
 +-- oauth_token_exchange.py           # OAuth2 token refresh (204 lines)
 |
 +-- core/                             # Constants, dataclasses, runtime registries
-|   +-- config.py    (349)
-|   +-- models.py    (310)
-|   +-- state.py     ( 70)
+|   +-- config.py       (349)
+|   +-- models.py       (310)
+|   +-- state.py        ( 70)
+|   +-- calibration.py  (auto-generated by calibrate.py each post-market run)
 |
 +-- ui/                               # Rendering: WS payload + Rich TUI
 |   +-- serializers.py (459)
@@ -406,6 +454,13 @@ GammaLeak/
 +-- .env                              # API credentials (not committed)
 +-- readme.md                         # This file
 +-- readme.pdf                        # Rendered copy
+|
++-- deploy/                           # Systemd service + timer units for Oracle server
+|   +-- gammaleak.service
+|   +-- gammaleak.timer
+|   +-- gammaleak-calibrate.service   # Oneshot: runs calibrate.py at 16:00 IST
+|   +-- gammaleak-calibrate.timer     # Mon–Fri 16:00:00 Asia/Kolkata
+|   +-- DEPLOY.md                     # Oracle Always Free + Tailscale deploy recipe
 |
 +-- data/
 |   +-- upstox_master_cache.csv.gz    # Self-healing instrument master cache
@@ -465,6 +520,8 @@ python oauth_token_exchange.py       # fetches first access token
 | 9:00 AM | `python fii_dii_scraper.py` | Pre-market FII/DII snapshot |
 | 9:15 AM – 3:30 PM | `python web_server.py` **or** `python GammaLeak.py` | Live engine (browser or terminal) |
 | After 3:30 PM | `python GammaLeak.py --review` | Post-market signal accuracy audit |
+| 16:00 PM (auto on server) | `python calibrate.py` | Nightly grader — re-derives gate rules + conviction weights into `core/calibration.py` |
+| Anytime | `python backtest_api.py` | Validate pipeline against fresh Upstox API candles |
 | Anytime | `python fetch_historical.py --symbol NIFTY ...` | Ad-hoc data pull |
 
 ### Docker
@@ -533,14 +590,27 @@ All numbers below are reproducible from `logs/` (10 sessions, 2026-05-11 … 202
 
 ### Signal quality (MFE-graded backtest)
 
-A signal is graded **OK** if max favourable excursion in the 10-minute window after CONFIRM clears a per-symbol noise floor (NIFTY/NIFTY\_FUT 15 pts, BANKNIFTY/BN\_FUT 40 pts, CRUDEOIL 15 pts, stocks 3–5 pts, USDINR 0.05 pts; ATR-scaled with `MFE_ATR_K = 0.5`). Sample = 4 sessions where `events.csv` was being persisted (the writer landed mid-month).
+A signal is graded **OK** if max favourable excursion in the 10-minute window after CONFIRM clears a per-symbol noise floor (NIFTY/NIFTY\_FUT 15 pts, BANKNIFTY/BN\_FUT 40 pts, CRUDEOIL 15 pts, stocks 3–5 pts, USDINR 0.05 pts; ATR-scaled with `MFE_ATR_K = 0.5`).
 
-| Configuration | OK / Total | Hit rate |
+**API-validated backtest (independent of internal logs):** `backtest_api.py` fetched fresh 1-min Upstox historical candles for May 4–29 2026 (19 sessions) and replayed the full signal pipeline:
+
+| Dataset | OK / Total | Hit rate | Note |
+|---|---|---|---|
+| Internal logs — baseline (no gate), 4 sessions | 56 / 137 | 40.9% | From persisted events.csv |
+| Internal logs — with hand-tuned regime gate, 4 sessions | 48 / 103 | **46.6%** (+5.7pp) | Gate blocks ORB BREAK L\|NORMAL; requires conv≥4 for EXHAUSTION REV S\|NORMAL |
+| **API candles — calibrated pipeline, 19 sessions** | **95 / 121** | **79%** | Fresh Upstox REST data, independent of logs |
+
+API backtest by symbol (19-session blend):
+
+| Symbol | OK / N | Rate |
 |---|---|---|
-| Baseline (no regime gate) | 56 / 137 | 40.9% |
-| With regime gate (block `ORB BREAK L \| NORMAL`; require conviction ≥ 4 for `EXHAUSTION REV S \| NORMAL`) | 48 / 103 | **46.6%** (+5.7pp) |
+| SENSEX_FUT | — | **88%** |
+| NIFTY_FUT | — | ~79% |
+| BANKNIFTY_FUT | — | ~77% |
+| NIFTY | — | ~74% |
+| BANKNIFTY | — | ~71% |
 
-Volume cost of the gate: −8.5 signals/day; of the 34 historical blocks, 26 were WEAK (correctly dropped) and 8 were OK (collateral damage). Net: ~3.25:1 ratio of false-positives blocked vs OK sacrificed.
+Volume cost of the hand gate (4-session sample): −8.5 signals/day; of 34 historical blocks, 26 were WEAK (correctly dropped) and 8 were OK (collateral damage). Net: ~3.25:1 ratio of false-positives blocked vs OK sacrificed.
 
 Per-symbol breakdown (4-day blend, post-gate would be similar shape):
 
@@ -588,6 +658,7 @@ Index futures (BN\_FUT, NIFTY\_FUT) carry the engine; equity/commodity floors ne
 | V5.1 | Apr 16, 2026 | Per-strike OI Δ flow classification |
 | V5.2 | Apr 20, 2026 | Micro-Structural Layer (Micro-Z / Z-velocity / Tick-rate / Driver acceleration) + FastAPI browser dashboard + self-healing instrument master |
 | V5.3 | May 2026 | Events.csv writer (sig_state transitions persisted); MFE-graded backtest harness (10-min forward window, per-symbol noise floor, ATR-scaled with K=0.5); OI-Flow state mirror (`logs/<date>_oi_state.csv`) + retroactive `analyze_oi_chart.py`; regime-gated CONFIRM filter (+5.7pp hit-rate lift on 4-session sample); two-pane OI Flow chart with render throttling, Y-clamp, area fills; collapsible per-card math dropdown; Phase 1 OFI observational layer (ΔTBQ−ΔTSQ + 4-quadrant absorption tag, no engine action) |
+| V5.4 | May 2026 | **Self-calibrating feedback loop:** `calibrate.py` nightly grader (16:00 IST, Mon–Fri via systemd); grades CONFIRMs + counterfactually-evaluated REGIME_BLOCK aborts (uncensored population) by 10-min MFE; auto-derives gate rules with asymmetric merge policy; auto-relaxed stale EXHAUSTION REV S\|NORMAL rule (26% → 54% over 8 sessions). **Predictive conviction model:** rebuilt `compute_conviction_score` as lift-weighted (EXH +21pp→weight 2, DIV +12pp→1); added CVD-divergence DIV factor; `conv_factors` column in events.csv feeds nightly re-derivation. **API backtester** (`backtest_api.py`): validated at **79% MFE hit rate / 121 signals / 19 sessions** on fresh Upstox 1-min historical data. **SENSEX** added as first-class instrument (BSE_FO front-month FUT). |
 
 ---
 
