@@ -103,6 +103,12 @@ def serialize_symbol(key: str) -> dict:
         "minute_sell_vol": int(s.minute_sell_vol),
         "last_completed_minute_delta": int(s.last_completed_minute_delta),
         "divergence_label": s.divergence_label,
+        # Phase 5: vol surface (NIFTY only — 0/"" for all other symbols)
+        "atm_iv": round(s.atm_iv * 100, 2),       # decimal → %, e.g. 0.14 → 14.00
+        "skew_25d": round(s.skew_25d * 100, 2),   # decimal → pp, e.g. 0.023 → 2.30
+        "iv_percentile": round(s.iv_percentile, 1),
+        "vol_regime": s.vol_regime,
+        "skew_state": s.skew_state,
     }
 
 

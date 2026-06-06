@@ -462,6 +462,21 @@ body {
 .microz-mild    { color: var(--yellow);  font-weight: 600; }
 .microz-long    { color: var(--green);   font-weight: 700; }
 .microz-short   { color: var(--red);     font-weight: 700; }
+.vol-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  margin-right: 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  background: #0e1e30;
+  color: var(--text-dim);
+  border: 1px solid #1e3040;
+}
+.vol-chip.up   { color: var(--green); background: var(--green-dim); border-color: #1e4a2f; }
+.vol-chip.down { color: var(--red);   background: var(--red-dim);   border-color: #4a1f28; }
+.vol-chip.warn { color: var(--yellow); background: #2a1e00; border-color: #3a2800; }
 
 /* ================================================================
    INDEX DRIVERS PANEL (Phase 2)
@@ -1245,6 +1260,21 @@ function renderInstruments(data) {
       ? `<span class="spike-tag" title="Ticks/s ${s.tick_rate_short.toFixed(1)} vs baseline ${s.tick_rate_baseline.toFixed(1)}">⚡ BURST</span>`
       : '';
 
+    // Phase 5: vol surface chips (NIFTY only)
+    let volChips = '';
+    if (s.display === 'NIFTY' && s.vol_regime) {
+      const ivBucket = s.vol_regime === 'LOW_IV' ? 'L' : s.vol_regime === 'HIGH_IV' ? 'H' : 'N';
+      const ivColor  = s.vol_regime === 'LOW_IV' ? 'up' : s.vol_regime === 'HIGH_IV' ? 'down' : 'neutral';
+      const ivChip = `<span class="vol-chip ${ivColor}" title="IV percentile: ${s.iv_percentile.toFixed(1)}th">IV ${s.atm_iv.toFixed(1)}% [${ivBucket}]</span>`;
+      let skewChip = '';
+      if (s.skew_state) {
+        const skewColor = s.skew_state === 'FEAR' ? 'down' : s.skew_state === 'COMPLACENCY' ? 'up' : 'neutral';
+        const skewSign  = s.skew_25d >= 0 ? '+' : '';
+        skewChip = `<span class="vol-chip ${skewColor}" title="${s.skew_state}">${skewSign}${s.skew_25d.toFixed(2)}pp ${s.skew_state}</span>`;
+      }
+      volChips = ivChip + skewChip;
+    }
+
     // V5.2: μZ metric (15-min de-anchored Z)
     const mz = (s.micro_std_dev > 0) ? s.micro_z_score : null;
     const microZCell = (mz != null)
@@ -1296,6 +1326,7 @@ function renderInstruments(data) {
       ${zBarHTML(s.z_score)}
       ${verdictRowHTML}
       ${(amberTag || spikeTag || setupBadge || convictionStars) ? `<div class="mt-4">${amberTag}${spikeTag}${setupBadge}${convictionStars}</div>` : ''}
+      ${volChips ? `<div class="mt-4">${volChips}</div>` : ''}
       <div class="inst-signal">
         <span class="signal-badge ${sigBg}">${sigText}</span>
         ${s.dynamic_regime ? `<span class="text-xs warn">${s.dynamic_regime}</span>` : ''}
@@ -1355,6 +1386,10 @@ function renderV4(data) {
     ['Dynamic Regime', nifty.dynamic_regime || '---'],
     ['Anchor Gate', nifty.anchor_gate || '---'],
     ['OI Flow', `${nifty.oi_flow_label || '---'} | ${nifty.oi_flow_ce_pe || '---'}`],
+    ...(nifty.vol_regime ? [
+      ['ATM IV', `${nifty.atm_iv != null ? nifty.atm_iv.toFixed(1) + '%' : '---'} (${nifty.iv_percentile != null ? nifty.iv_percentile.toFixed(0) + 'th pct' : '---'})`],
+      ['25Δ Skew', `${nifty.skew_25d != null ? (nifty.skew_25d >= 0 ? '+' : '') + nifty.skew_25d.toFixed(2) + 'pp' : '---'} ${nifty.skew_state || ''}`],
+    ] : []),
   ];
 
   el.innerHTML = rows.map(([k, v]) => `<div class="kv-row"><span class="k">${k}</span><span class="v fw-600">${v}</span></div>`).join('');
