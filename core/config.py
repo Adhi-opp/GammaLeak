@@ -262,6 +262,12 @@ GAMMA_FLUSH_WINDOW_SECS = 180         # 3-minute rolling window
 GAMMA_FLUSH_HISTORY_MAXLEN = 360      # ~3min at 2 ticks/sec
 
 
+# --------------------------- PHASE 5: VOL SURFACE ---------------------------
+
+VOL_SAMPLE_INTERVAL_SECS: float = 5.0   # how often to recompute ATM IV + skew
+VOL_IV_HISTORY_MAXLEN: int = 360        # deque depth per strike (~3min at 2 ticks/sec, matches gamma flush)
+
+
 # --------------------------- V4.0: ADAPTIVE REGIME ENGINE ---------------------------
 
 ATR_PERIOD = 14
@@ -491,6 +497,7 @@ HAND_CONVICTION_WEIGHTS: dict[str, int] = {
     "OIF":   1,   # OI flow aligns with fade side — not yet instrumented, kept neutral
     "DRIFT": 1,   # 5-min drift opposes the stretch — suspected weak; instrumented now
     "OFI":   0,   # Phase-1 OFI absorption aligns — instrumented, off until validated
+    "VOL":   0,   # Phase-5 low-IV + non-FEAR skew — instrumented, off until calibrated
 }
 
 

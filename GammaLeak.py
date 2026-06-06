@@ -1209,6 +1209,9 @@ def compute_conviction_score(
     if (side > 0 and ab in ("BEAR_ABSORB", "BULL_VOID")) or \
        (side < 0 and ab in ("BULL_ABSORB", "BEAR_VOID")):
         factors.append("OFI")
+    # VOL — low IV + non-FEAR skew = favorable fade environment (weight 0 until calibrated).
+    if state.vol_regime == "LOW_IV" and state.skew_state not in ("FEAR", ""):
+        factors.append("VOL")
 
     score = 1 + sum(CONVICTION_FACTOR_WEIGHTS.get(f, 0) for f in factors)
     state.conviction_factors = ",".join(factors)
@@ -1378,6 +1381,7 @@ def compute_atr_from_buckets(state: SymbolState) -> float:
 # explicit import below mirrors them into GammaLeak's namespace too.
 from orderflow.oi_flow import *  # noqa: F401, F403
 from signals.regimes import *  # noqa: F401, F403
+from signals.vol_regime import update_nifty_vol_state
 
 
 def update_oi_roc_tracking(instrument_key: str, oi: float, timestamp: float) -> None:
@@ -1632,6 +1636,11 @@ def update_signal_engine(
 
         # Compute straddle-implied box
         compute_straddle_box(state)
+
+        # Phase 5: vol surface (throttled to VOL_SAMPLE_INTERVAL_SECS)
+        if (state.last_tick_ts or 0.0) - state._last_vol_surface_ts >= VOL_SAMPLE_INTERVAL_SECS:
+            update_nifty_vol_state(state, state.last_tick_ts or time.time())
+            state._last_vol_surface_ts = state.last_tick_ts or time.time()
 
         # Cross-asset anchor gate (side-aware, computed after Z-score)
         _anchor_side = 1 if state.z_score > 0 else -1 if state.z_score < 0 else 0
@@ -2076,10 +2085,21 @@ def update_option_greeks(
     if instrument_key not in PCR_KEY_STRIKE:
         return
     strike = PCR_KEY_STRIKE[instrument_key]
+    side = PCR_KEY_SIDE.get(instrument_key, "")
 
     if strike not in pcr_state.iv_history:
         pcr_state.iv_history[strike] = deque(maxlen=GAMMA_FLUSH_HISTORY_MAXLEN)
     pcr_state.iv_history[strike].append((timestamp, iv))
+
+    # Phase 5: split by side so vol_surface.py can compute skew cleanly
+    if side == "CE":
+        if strike not in pcr_state.iv_history_ce:
+            pcr_state.iv_history_ce[strike] = deque(maxlen=GAMMA_FLUSH_HISTORY_MAXLEN)
+        pcr_state.iv_history_ce[strike].append((timestamp, iv))
+    elif side == "PE":
+        if strike not in pcr_state.iv_history_pe:
+            pcr_state.iv_history_pe[strike] = deque(maxlen=GAMMA_FLUSH_HISTORY_MAXLEN)
+        pcr_state.iv_history_pe[strike].append((timestamp, iv))
 
     if strike not in pcr_state.gamma_history:
         pcr_state.gamma_history[strike] = deque(maxlen=GAMMA_FLUSH_HISTORY_MAXLEN)

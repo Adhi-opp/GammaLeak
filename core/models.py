@@ -205,6 +205,14 @@ class SymbolState:
     english_why: str = ""                      # short reason — what's driving the verdict
     english_confidence: str = ""               # LOW / MED / HIGH
 
+    # Phase 5: vol surface (NIFTY only; updated every VOL_SAMPLE_INTERVAL_SECS)
+    atm_iv: float = 0.0                        # mean CE+PE IV at ATM (decimal, e.g. 0.14 = 14%)
+    skew_25d: float = 0.0                      # OTM put IV - OTM call IV (positive = put premium)
+    iv_percentile: float = 0.0                 # ATM IV vs rolling 30-session history (0–100)
+    vol_regime: str = ""                        # LOW_IV | NORMAL_IV | HIGH_IV
+    skew_state: str = ""                        # FEAR | NEUTRAL | COMPLACENCY
+    _last_vol_surface_ts: float = 0.0          # throttle stamp — do not serialise
+
 
 @dataclass
 class MacroQuote:
@@ -243,6 +251,11 @@ class PCRState:
     pe_ltp_by_strike: dict[int, float] = field(default_factory=dict)
     oi_history_ce: dict[int, deque] = field(default_factory=dict)  # deque of (ts, oi)
     oi_history_pe: dict[int, deque] = field(default_factory=dict)  # deque of (ts, oi)
+
+    # Phase 5: per-side IV history for skew computation (split from iv_history which
+    # mixes CE+PE and is retained for gamma-flush detection backward-compat)
+    iv_history_ce: dict[int, deque] = field(default_factory=dict)  # deque of (ts, iv)
+    iv_history_pe: dict[int, deque] = field(default_factory=dict)  # deque of (ts, iv)
 
     @property
     def ce_total(self) -> float:
