@@ -16,15 +16,15 @@
 | Aspect | Detail |
 |---|---|
 | **Domain** | Live tick stream from Upstox WebSocket v3 — NIFTY 50, BANKNIFTY, NIFTY/BN front-month futures, USDINR FUT, CRUDEOIL FUT, India VIX, plus equity drivers (RELIANCE, HDFCBANK, SBIN, ICICIBANK) and a dynamic NIFTY option-chain window |
-| **Scale** | Measured across 10 sessions (2026-05-11 … 2026-05-22): **164K–330K logged ticks per session** (mean 254K) for 9 core instruments; aggregate tick rate **avg 13/s, p95 17/s, peak 37–41/s** on the busiest sessions (single-symbol peak 12/s) |
+| **Scale** | Measured across 10 sessions (2026-05-19 … 2026-06-04): **292K–365K logged ticks per session** (mean 323K) for 11 instruments; aggregate tick rate **avg ~16/s, peak 132/s** (May 27, 12:55 IST — verified from per-second bucket counts across all symbol CSVs) |
 | **Codebase** | ~10,000 lines Python: `GammaLeak.py` (4,032) + 6 packages (`core`, `ui`, `orderflow`, `signals`, `analytics`, `gammaleak_runtime`, 3,542 total) + FastAPI broadcaster (256) + utility scripts (1,429) + `calibrate.py` nightly grader (~600) + `backtest_api.py` API backtester (~300); ~2,390 lines vanilla-JS dashboard (`static/index.html` 1,902 + `static/simulation.html` 488) |
-| **Pipeline** | gzip → protobuf decode → per-symbol `SymbolState` → 6-stage math + Lee-Ready aggressor → CVD + 5 divergence patterns → lift-weighted conviction score → English-verdict composer → 4 Hz WebSocket fan-out + per-symbol CSV; nightly `calibrate.py` re-derives regime gate rules and conviction weights from MFE-graded outcomes |
+| **Pipeline** | gzip → protobuf decode → per-symbol `SymbolState` → 6-stage math + Lee-Ready aggressor → CVD + 5 divergence patterns → vol surface (ATM IV / 25Δ skew / IV percentile) → lift-weighted conviction score → English-verdict composer → 4 Hz WebSocket fan-out + per-symbol CSV; nightly `calibrate.py` re-derives regime gate rules and conviction weights from MFE-graded outcomes |
 | **Persistence** | 20-column versioned schema, **per-symbol parallel log streams** under `logs/YYYY-MM-DD/<SYMBOL>.csv`, **schema-aware rotation** at boot (legacy files auto-archived), depth-drop-safe order-book extraction |
-| **Differentiator** | F&O domain depth — Lee-Ready CVD, OI-flow velocity, max-pain + gamma walls, gamma-flush detection, ATM straddle box, spot↔FUT verdict mirror — layered cleanly on top of streaming-systems engineering |
+| **Differentiator** | F&O domain depth — Lee-Ready CVD, OI-flow velocity, max-pain + gamma walls, gamma-flush detection, ATM straddle box, live vol surface (ATM IV / 25Δ skew / IV percentile from Upstox protobuf — no BS inversion), spot↔FUT verdict mirror — layered cleanly on top of streaming-systems engineering |
 
 ## What this project demonstrates
 
-- **Streaming systems** — protobuf decode at measured ~13 ticks/s sustained / ~40 ticks/s peak across 9 symbols, `asyncio.Queue` decoupling tick path from disk path, `asyncio.to_thread` batched writes (5 ticks or 1 s), ≤ 250 ms broadcast cycle, WebSocket silence watchdog + reconnect loop.
+- **Streaming systems** — protobuf decode at measured ~16 ticks/s sustained / 132 ticks/s peak (verified per-second bucket across 11 symbols), `asyncio.Queue` decoupling tick path from disk path with LIFO overflow drain above 500-item backlog, `asyncio.to_thread` batched writes (5 ticks or 1 s), ≤ 250 ms broadcast cycle, WebSocket silence watchdog + reconnect loop.
 - **Schema engineering** — versioned 20-column CSV schema; bootloader detects legacy-schema files on disk and archives them with a timestamp suffix before opening fresh streams; no silent corruption across schema bumps.
 - **Reliability under live-feed chaos** — exchange depth drops to zero levels gracefully handled with `try/except` around `marketLevel.bidAskQuote[0]`; instrument-master resolver **loud-fails** on missing contracts instead of hardcoding fallbacks; daily expiry rollover handled by a self-healing instrument-master cache.
 - **Domain depth** — Lee-Ready aggressor classification (tick rule + midpoint refinement on zero-tick), cumulative volume delta with **pullback-validated** exhaustion detectors (kills gap-day false fires), OI-delta flow classification (NEW LONGS / NEW SHORTS / SHORT COVER / LONG EXIT), max-pain + gamma-wall anchors, spot-to-FUT verdict mirroring so spot cards inherit flow context from the volume-bearing futures leg.
@@ -43,10 +43,12 @@ flowchart LR
     AGG --> CVD[CVD + 5 divergence<br/>patterns]
     ST --> OIF[OI-flow classifier<br/>+ 30m timeline]
     ST --> OIL[Max-pain<br/>+ gamma walls]
+    ST --> VOL[Vol Surface<br/>ATM IV / 25Δ skew / IV pct]
     MATH --> VER[Plain-English<br/>verdict composer]
     CVD --> VER
     OIF --> VER
     OIL --> VER
+    VOL --> VER
     VER --> Q[asyncio.Queue]
     Q --> DISK[Per-symbol CSV<br/>20-col schema]
     DISK --> ROT[Schema-aware<br/>rotation on boot]
@@ -145,6 +147,7 @@ The engine is an **additive** stack — every new layer was shipped *without* de
 | **Phase 5** (Order-Flow + English Verdict) | `orderflow/aggressor.py` — Lee-Ready aggressor on FUT legs → CVD → 5 divergence patterns (BUYER_EXHAUSTION / SELLER_EXHAUSTION / BREAKOUT_CONFIRMED / BUY_ABSORPTION / SELL_ABSORPTION) with pullback validation; `signals/verdicts.py` — plain-English composer (`FADE THE EXTREME`, `RIDE THE BREAKOUT`, `STAND ASIDE`, …) with confidence tier; spot→FUT verdict mirror | Display tier — drives the dashboard's primary verdict label; underlying state machine unchanged |
 | **Calibration Loop** (V5.4) | `calibrate.py` — nightly grader (16:00 IST, Mon–Fri); grades events.csv CONFIRMs + counterfactually-scores REGIME_BLOCK aborts by 10-min forward MFE; derives `(setup × regime)` gate rules and per-factor conviction weights; writes `core/calibration.py`; `core/config.py::_merge_regime_rules` applies asymmetric merge over hand rules | Adaptive — auto-tightens on underperformers, auto-relaxes stale blocks; lifts hit rate without manual rule edits |
 | **Predictive Conviction** (V5.4) | Lift-weighted `compute_conviction_score` (base 1 + Σ CONVICTION_FACTOR_WEIGHTS, cap 5); added DIV factor (CVD divergence aligned with fade direction, measured +12 pp lift); `conv_factors` column in events.csv records active factors at each CONFIRM for nightly re-derivation | Fixes non-monotonicity of flat +1 model; conviction now tracks measured edge per factor |
+| **Phase 5 Vol Surface** (V5.5) | `analytics/vol_surface.py` — ATM IV (CE+PE mean at nearest 50-pt strike), 25Δ skew proxy (OTM put IV − OTM call IV at ATM±100 pts), IV percentile vs rolling 30-session history in `logs/iv_session_history.csv`; IV values read directly from Upstox protobuf `mf.iv` — no Black-Scholes inversion. `signals/vol_regime.py` — classifies `LOW_IV / NORMAL_IV / HIGH_IV` and `FEAR / NEUTRAL / COMPLACENCY`; expiry-aware (skips expiry-day baseline recording; post-13:00 vol crush labelled `EXPIRY` not `LOW_IV`). `VOL` conviction factor fires in `LOW_IV + non-FEAR` conditions (weight 0 observational — calibrate.py will assign weight after 2+ weeks of live data). NIFTY card shows IV chip `IV 14.2% [L/N/H/E]` + skew chip `+2.3pp FEAR` | Dashboard display + `VOL` in `conv_factors` — does NOT touch sig_state |
 
 ### V5.2 Micro-Structural Layer
 
@@ -168,8 +171,8 @@ The original monolith was split into six packages. Public names continue to reso
 | `core/` | `config.py` (349), `models.py` (310), `state.py` (70), `calibration.py` (auto-generated) | Constants, dataclass shapes (`SymbolState`, `TickData`, `OILevels`, `OIWall`), runtime registries; `calibration.py` holds nightly-derived `CALIBRATED_REGIME_RULES`, `CALIBRATED_RELAX`, `CALIBRATED_CONVICTION_WEIGHTS`, `CALIBRATED_MFE_FLOORS` — regenerated by `calibrate.py` each post-market run |
 | `ui/` | `serializers.py` (459), `terminal.py` (446) | Builds the WebSocket JSON payload consumed by `static/index.html`; Rich-based terminal HUD renderer |
 | `orderflow/` | `aggressor.py` (191), `gamma.py` (76), `oi_chain.py` (263), `oi_flow.py` (127), `oi_levels.py` (127) | Lee-Ready + CVD + divergences; gamma-flush; option-chain processing; OI-delta flow classification + 30-min timeline; max-pain + gamma walls |
-| `signals/` | `verdicts.py` (135), `exhaustion.py` (77), `momentum.py` (176), `regimes.py` (94) | English verdict composer; sig_state lifecycle + thesis decay; V5.2 micro-structural layer; V4.0 adaptive regime classifier |
-| `analytics/` | `math_stats.py` (79), `global_indices.py` (155) | Kaufman ER + R/S Hurst (pure numpy); batched Upstox `/v3/market-quote/ltp` poller for global indices (GIFT NIFTY, Dow, S&P, Nasdaq, FTSE, Asia) |
+| `signals/` | `verdicts.py` (135), `exhaustion.py` (77), `momentum.py` (176), `regimes.py` (94), `vol_regime.py` (90) | English verdict composer; sig_state lifecycle + thesis decay; V5.2 micro-structural layer; V4.0 adaptive regime classifier; vol surface regime classifier (LOW_IV / NORMAL_IV / HIGH_IV / EXPIRY, FEAR / NEUTRAL / COMPLACENCY) |
+| `analytics/` | `math_stats.py` (79), `global_indices.py` (155), `vol_surface.py` (145) | Kaufman ER + R/S Hurst (pure numpy); batched Upstox `/v3/market-quote/ltp` poller for global indices; live vol surface metrics (ATM IV, 25Δ skew proxy, IV percentile, session-open history CSV) |
 | `gammaleak_runtime/` | `io_logs.py` (177) | Per-symbol CSV writer + async disk-writer task + schema-aware boot-time rotation |
 
 ---
@@ -432,15 +435,17 @@ GammaLeak/
 |   +-- oi_flow.py    (127)
 |   +-- oi_levels.py  (127)
 |
-+-- signals/                          # Verdict composer + sig_state lifecycle + regime + V5.2
++-- signals/                          # Verdict composer + sig_state lifecycle + regime + V5.2 + vol regime
 |   +-- verdicts.py   (135)
 |   +-- exhaustion.py ( 77)
 |   +-- momentum.py   (176)
 |   +-- regimes.py    ( 94)
+|   +-- vol_regime.py ( 90)           # LOW_IV/NORMAL_IV/HIGH_IV/EXPIRY + FEAR/NEUTRAL/COMPLACENCY classifiers
 |
-+-- analytics/                        # Pure-math + global indices snapshot
++-- analytics/                        # Pure-math + global indices + vol surface
 |   +-- math_stats.py    ( 79)
 |   +-- global_indices.py (155)
+|   +-- vol_surface.py    (145)       # ATM IV, 25Δ skew proxy, IV percentile, session-open history CSV
 |
 +-- gammaleak_runtime/                # Per-symbol CSV writer + schema-aware rotation
 |   +-- io_logs.py (177)
@@ -466,6 +471,7 @@ GammaLeak/
 |   +-- upstox_master_cache.csv.gz    # Self-healing instrument master cache
 +-- historical/                       # Downloaded OHLCV CSVs
 +-- logs/                             # Per-symbol tick logs (logs/YYYY-MM-DD/<SYMBOL>.csv)
+|   +-- iv_session_history.csv        # Session-open ATM IV baseline (written at 09:20 IST, used for IV percentile)
 +-- docs/                             # Dashboard guide + resume bullets
 +-- research/                         # Historical research artifacts (CSVs, XLSX, MD, HTML, PDF)
 ```
@@ -567,23 +573,23 @@ Snapshot PCR + max-pain tells you positioning but not *intent*. Diffing ATM±2 C
 
 ### Why Protobuf over JSON for WebSocket?
 
-Upstox v3 WebSocket sends gzip-compressed Protobuf. Measured aggregate rate on the live feed is modest (avg ~13 ticks/s, peak ~40 ticks/s across 9 symbols on the busiest sessions), but binary decoding is still meaningfully cheaper than JSON parse per-tick — and protocol choice was Upstox's, not ours. The relevant engineering decision is keeping the decode path off the event-loop critical section so the dashboard broadcast and disk writer never starve.
+Upstox v3 WebSocket sends gzip-compressed Protobuf. Measured aggregate rate on the live feed is modest (avg ~16 ticks/s, peak 132 ticks/s across 11 instruments on the busiest seconds), but binary decoding is still meaningfully cheaper than JSON parse per-tick — and protocol choice was Upstox's, not ours. The relevant engineering decision is keeping the decode path off the event-loop critical section so the dashboard broadcast and disk writer never starve.
 
 ---
 
 ## Measured Performance
 
-All numbers below are reproducible from `logs/` (10 sessions, 2026-05-11 … 2026-05-22) and the engine config — no synthetic events, no rounded-up approximations.
+All numbers below are reproducible from `logs/` (10 sessions, 2026-05-19 … 2026-06-04) and the engine config — no synthetic events, no rounded-up approximations.
 
 ### Throughput (live feed)
 
 | Metric | Value | Source |
 |---|---|---|
-| Logged ticks per session (9 core symbols) | 164K – 330K (mean 254K) | `wc -l logs/YYYY-MM-DD/*.csv` × 10 sessions |
-| Aggregate tick rate, mean | ~13 ticks/s | per-second bucket count, busiest sessions |
-| Aggregate tick rate, p95 | ~17 ticks/s | same |
-| Aggregate tick rate, peak (1 s bucket) | 37–41 ticks/s | same |
-| Single-symbol peak (NIFTY) | 12 ticks/s | `awk` per-second bucket on NIFTY.csv |
+| Logged ticks per session (11 instruments) | 292K – 365K (mean 323K) | line counts across all per-symbol CSVs, 10 sessions |
+| Weekly tick accumulation (4-session weeks) | ~1.3M | sessions May 25–29: 1,300K; May 19–22: 1,237K |
+| Aggregate tick rate, mean | ~16 ticks/s | 365K ticks / 22,927 s on Jun 4 |
+| Aggregate tick rate, peak (1 s bucket) | **132 ticks/s** | May 27, 12:55:00 IST — per-second bucket across all symbol CSVs |
+| NIFTY single-symbol, mean | ~3.9 ticks/s | 90,424 ticks / 22,927 s on Jun 4 |
 | Broadcast cadence | 4 Hz (250 ms) | `asyncio.sleep(0.25)` in `web_server.py` broadcast loop |
 | Disk-writer batch | 5 ticks **or** 1 s | `LOG_BATCH_SIZE=5`, `LOG_FLUSH_INTERVAL_SECS=1.0` |
 | WebSocket silence watchdog | 30 s | `WS_TICK_TIMEOUT_SECS=30` |
@@ -631,13 +637,14 @@ Index futures (BN\_FUT, NIFTY\_FUT) carry the engine; equity/commodity floors ne
 - **V5.2 amber lead-time vs ALERT** — `events.csv` doesn't log amber transitions, so the design claim that amber fires *before* the state machine is unmeasured.
 - **OI flow timeline anchor accuracy** — `analyze_oi_chart.py` produces touch-respect tables (~45% max-pain 15m respect on the 2026-05-22 sample) but the full distribution across sessions isn't aggregated.
 - **End-to-end latency** (tick-on-wire → dashboard pixel) — would need synchronized timestamps; current `last_tick_ts` is engine-side only.
+- **VOL conviction factor lift** — Phase 5 vol surface is instrumented (observational, weight 0); requires ~2 weeks of live sessions before `calibrate.py` can measure per-factor MFE lift and assign a non-zero weight. `iv_session_history.csv` doesn't exist yet — IV percentile defaults to 50th for the first 2 sessions.
 
 ---
 
 ## Limitations
 
 - No order execution — this is an **attention filter**, not a trading system
-- No options Greeks surface (IV skew, vega ladder) beyond PCR + Max-Pain + Gamma walls
+- Vol surface limited to ATM IV + 25Δ skew proxy (no full vega ladder, no term structure across expiries, no per-strike Greeks beyond the two OTM reference strikes)
 - No Level 2 / market-depth data (Upstox feed is L1)
 - FII/DII is end-of-day only (NSE doesn't publish intraday)
 - Access token expires every 24 h — manual OAuth refresh required
@@ -659,6 +666,7 @@ Index futures (BN\_FUT, NIFTY\_FUT) carry the engine; equity/commodity floors ne
 | V5.2 | Apr 20, 2026 | Micro-Structural Layer (Micro-Z / Z-velocity / Tick-rate / Driver acceleration) + FastAPI browser dashboard + self-healing instrument master |
 | V5.3 | May 2026 | Events.csv writer (sig_state transitions persisted); MFE-graded backtest harness (10-min forward window, per-symbol noise floor, ATR-scaled with K=0.5); OI-Flow state mirror (`logs/<date>_oi_state.csv`) + retroactive `analyze_oi_chart.py`; regime-gated CONFIRM filter (+5.7pp hit-rate lift on 4-session sample); two-pane OI Flow chart with render throttling, Y-clamp, area fills; collapsible per-card math dropdown; Phase 1 OFI observational layer (ΔTBQ−ΔTSQ + 4-quadrant absorption tag, no engine action) |
 | V5.4 | May 2026 | **Self-calibrating feedback loop:** `calibrate.py` nightly grader (16:00 IST, Mon–Fri via systemd); grades CONFIRMs + counterfactually-evaluated REGIME_BLOCK aborts (uncensored population) by 10-min MFE; auto-derives gate rules with asymmetric merge policy; auto-relaxed stale EXHAUSTION REV S\|NORMAL rule (26% → 54% over 8 sessions). **Predictive conviction model:** rebuilt `compute_conviction_score` as lift-weighted (EXH +21pp→weight 2, DIV +12pp→1); added CVD-divergence DIV factor; `conv_factors` column in events.csv feeds nightly re-derivation. **API backtester** (`backtest_api.py`): validated at **79% MFE hit rate / 121 signals / 19 sessions** on fresh Upstox 1-min historical data. **SENSEX** added as first-class instrument (BSE_FO front-month FUT). |
+| V5.5 | Jun 2026 | **Live vol surface:** `analytics/vol_surface.py` + `signals/vol_regime.py` — ATM IV (CE+PE mean), 25Δ skew proxy (OTM put − call IV at ATM±100 pts), IV percentile vs rolling 30-session baseline; IV values read directly from Upstox protobuf `mf.iv` field (no Black-Scholes inversion). `VOL` conviction factor (weight 0 observational). **Expiry-aware:** expiry-day session-open IV excluded from history baseline; post-13:00 vol crush labelled `EXPIRY` so `LOW_IV`-gated logic (VOL factor, future ATR floor) doesn't fire spuriously on structural vol collapse. **Dashboard:** IV chip (`IV 14.2% [L/N/H/E]`) + skew chip (`+2.3pp FEAR`) on NIFTY card; full ATM IV + raw percentile + skew in `▸ math` dropdown. **Pre-live fixes:** `_latest_iv` walks backwards past trailing iv=0 ticks; bootloader stamps expiry ISO date for session guards. |
 
 ---
 
