@@ -1263,8 +1263,8 @@ function renderInstruments(data) {
     // Phase 5: vol surface chips (NIFTY only)
     let volChips = '';
     if (s.display === 'NIFTY' && s.vol_regime) {
-      const ivBucket = s.vol_regime === 'LOW_IV' ? 'L' : s.vol_regime === 'HIGH_IV' ? 'H' : 'N';
-      const ivColor  = s.vol_regime === 'LOW_IV' ? 'up' : s.vol_regime === 'HIGH_IV' ? 'down' : 'neutral';
+      const ivBucket = s.vol_regime === 'LOW_IV' ? 'L' : s.vol_regime === 'HIGH_IV' ? 'H' : s.vol_regime === 'EXPIRY' ? 'E' : 'N';
+      const ivColor  = s.vol_regime === 'LOW_IV' ? 'up' : s.vol_regime === 'HIGH_IV' ? 'down' : s.vol_regime === 'EXPIRY' ? 'warn' : 'neutral';
       const ivChip = `<span class="vol-chip ${ivColor}" title="IV percentile: ${s.iv_percentile.toFixed(1)}th">IV ${s.atm_iv.toFixed(1)}% [${ivBucket}]</span>`;
       let skewChip = '';
       if (s.skew_state) {

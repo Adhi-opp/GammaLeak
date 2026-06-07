@@ -1382,6 +1382,7 @@ def compute_atr_from_buckets(state: SymbolState) -> float:
 from orderflow.oi_flow import *  # noqa: F401, F403
 from signals.regimes import *  # noqa: F401, F403
 from signals.vol_regime import update_nifty_vol_state
+from analytics.vol_surface import set_expiry_date as _set_vol_expiry_date
 
 
 def update_oi_roc_tracking(instrument_key: str, oi: float, timestamp: float) -> None:
@@ -3334,6 +3335,17 @@ async def resolve_dynamic_instruments():
     if nifty_expiry:
         PCR_EXPIRY_CODE = nifty_expiry
         console.print(f"[green][OK] NIFTY Options Expiry: {PCR_EXPIRY_CODE}[/green]")
+        # Resolve full ISO expiry date for expiry-day vol surface guards
+        if nifty_key and _instrument_master_by_symbol:
+            for _insts in _instrument_master_by_symbol.values():
+                _m = next((m for m in _insts if m.get("instrument_key") == nifty_key), None)
+                if _m and _m.get("expiry"):
+                    try:
+                        _set_vol_expiry_date(date.fromisoformat(_m["expiry"]))
+                        console.print(f"[green][OK] Vol surface expiry date: {_m['expiry']}[/green]")
+                    except ValueError:
+                        pass
+                    break
     else:
         missing.append("NIFTY OPT (weekly/monthly)")
 

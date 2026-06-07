@@ -16,16 +16,21 @@ distribution will naturally tighten; do not over-tune on fewer than 20 points.
 from __future__ import annotations
 
 import time
+from datetime import datetime
 
 from analytics.vol_surface import (
     VOL_SAMPLE_INTERVAL_SECS,
     get_atm_iv,
     get_skew,
     get_iv_percentile,
+    get_expiry_date,
     load_history,
     maybe_record_session_iv,
 )
+from core.config import IST
 from core.state import pcr_state
+
+_EXPIRY_CRUSH_HOUR = 13  # after 13:00 IST on expiry, vol crush is structural
 
 # IV percentile thresholds
 VOL_IV_LOW_PCT: float = 30.0   # below = LOW_IV (historically cheap vol, fades clean)
@@ -82,7 +87,17 @@ def update_nifty_vol_state(state, timestamp: float) -> None:
     history = load_history()
     iv_pct = get_iv_percentile(atm_iv, history)
     state.iv_percentile = iv_pct
-    state.vol_regime = classify_iv_regime(iv_pct)
+
+    expiry_date = get_expiry_date()
+    ts_ist = datetime.fromtimestamp(now, IST)
+    on_expiry = (expiry_date is not None and state.session_day == expiry_date)
+    if on_expiry and ts_ist.hour >= _EXPIRY_CRUSH_HOUR:
+        # Post-13:00 on expiry: IV collapses structurally (vol crush), not
+        # because the market is calm. Label it separately so LOW_IV-gated
+        # logic (VOL conviction factor, ATR floor) doesn't fire spuriously.
+        state.vol_regime = "EXPIRY"
+    else:
+        state.vol_regime = classify_iv_regime(iv_pct)
 
     if state.session_day is not None:
         maybe_record_session_iv(atm_iv, state.session_day.isoformat(), now)

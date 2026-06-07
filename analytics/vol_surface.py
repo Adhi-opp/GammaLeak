@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import csv
 from collections import deque
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from core.config import IST, LOG_DIR
@@ -34,6 +34,7 @@ _IV_SAMPLE_MINUTE = 20                 # sample session-open ATM IV at 09:20 IST
 _iv_history_cache: list[float] = []
 _history_loaded: bool = False
 _session_iv_date: str = ""             # date of the last appended session-open entry
+_pcr_expiry_date: date | None = None   # set by bootloader; used to skip expiry-day recording
 
 
 # ---------------------------------------------------------------------------
@@ -41,13 +42,19 @@ _session_iv_date: str = ""             # date of the last appended session-open 
 # ---------------------------------------------------------------------------
 
 def _latest_iv(history: deque | None, now: float) -> float | None:
-    """Return the most-recent IV from a (ts, iv) deque if within max age."""
+    """Return the most-recent non-zero IV from a (ts, iv) deque if within max age.
+
+    Walks backwards so a single iv=0 tick (quote update with no computed IV)
+    doesn't blank the reading when the previous entry was valid.
+    """
     if not history:
         return None
-    ts, iv = history[-1]
-    if (now - ts) > VOL_MAX_IV_AGE_SECS or iv <= 0.0:
-        return None
-    return float(iv)
+    for ts, iv in reversed(history):
+        if (now - ts) > VOL_MAX_IV_AGE_SECS:
+            return None  # everything older is also outside the window
+        if iv > 0.0:
+            return float(iv)
+    return None
 
 
 def _load_history() -> list[float]:
@@ -109,11 +116,27 @@ def get_iv_percentile(current_iv: float, history: list[float]) -> float:
     return (below / len(history)) * 100.0
 
 
+def set_expiry_date(d: date | None) -> None:
+    """Called by the bootloader once PCR expiry is resolved."""
+    global _pcr_expiry_date
+    _pcr_expiry_date = d
+
+
+def get_expiry_date() -> date | None:
+    return _pcr_expiry_date
+
+
 def maybe_record_session_iv(atm_iv: float, session_day_str: str, now: float) -> None:
-    """Append session-open ATM IV to the history file once per session at 09:20 IST."""
+    """Append session-open ATM IV to the history file once per session at 09:20 IST.
+
+    Skips expiry days — IV at session open on expiry is elevated vs normal
+    sessions and would skew the 30-session percentile baseline upward.
+    """
     global _iv_history_cache, _session_iv_date
     if session_day_str == _session_iv_date:
         return
+    if _pcr_expiry_date is not None and _pcr_expiry_date.isoformat() == session_day_str:
+        return  # expiry day: IV structure is atypical, don't pollute history
     ts_ist = datetime.fromtimestamp(now, IST)
     if ts_ist.hour != _IV_SAMPLE_HOUR or ts_ist.minute < _IV_SAMPLE_MINUTE:
         return
