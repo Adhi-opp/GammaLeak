@@ -18,6 +18,12 @@ if TYPE_CHECKING:
 # inside the function so that test scaffolds (which sometimes tweak them) see
 # the live values, and so that circular-import ordering is irrelevant.
 
+# Display-only knob (stays here, not GammaLeak): how far past vwap counts as a
+# "stretch" that an absorption bias is fighting. At/above this |Z| the absorption
+# verdict is downgraded to a flagged conflict instead of a HIGH-confidence call.
+ABSORPTION_CONFLICT_Z = 2.5
+
+
 def compute_english_guidance(state: "SymbolState") -> tuple[str, str, str]:
     """Return (verdict, why, confidence) for a single instrument's current state.
 
@@ -59,10 +65,24 @@ def compute_english_guidance(state: "SymbolState") -> tuple[str, str, str]:
                 "OR break with aggressive flow alignment — go with it",
                 "HIGH")
     if dl == "SELL_ABSORPTION":
+        # Bias is long. If price is already stretched well ABOVE vwap, that long
+        # is fighting a strong mean-reversion fade — flag the conflict instead of
+        # asserting HIGH-confidence long into a +Nσ extension.
+        if z >= ABSORPTION_CONFLICT_Z:
+            return ("ABSORPTION vs STRETCH",
+                    f"selling absorbed (bias long) but +{az:.1f}σ over vwap — "
+                    "flow and mean-reversion disagree, wait for one to win",
+                    "MED")
         return ("SELL ABSORPTION",
                 "price flat but heavy selling absorbed — downside trapped, bias long",
                 "HIGH")
     if dl == "BUY_ABSORPTION":
+        # Mirror guard: a short into a deep -Nσ stretch fights the bounce.
+        if z <= -ABSORPTION_CONFLICT_Z:
+            return ("ABSORPTION vs STRETCH",
+                    f"buying absorbed (bias short) but {z:.1f}σ under vwap — "
+                    "flow and mean-reversion disagree, wait for one to win",
+                    "MED")
         return ("BUY ABSORPTION",
                 "price flat but heavy buying absorbed — upside trapped, bias short",
                 "HIGH")

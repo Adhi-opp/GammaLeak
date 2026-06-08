@@ -1116,15 +1116,26 @@ function renderFocus(data) {
     el.innerHTML = '<div class="dim">No active focus names.</div>';
     return;
   }
-  el.innerHTML = data.focus.map((f, i) => `
+  // Mirror the card rule: a live English verdict supersedes the raw engine
+  // signal, so the focus badge shows the verdict — otherwise FOCUS and the card
+  // below it print contradictory calls for the same name.
+  const bySymbol = {};
+  (data.symbols || []).forEach(s => { bySymbol[s.display] = s; });
+  el.innerHTML = data.focus.map((f, i) => {
+    const sym = bySymbol[f.display];
+    const verdictShown = sym && sym.english_verdict && sym.sig_state >= 1;
+    const badge = verdictShown
+      ? `<span class="focus-badge ${verdictClass(sym.english_confidence)}">${sym.english_verdict}</span>`
+      : `<span class="focus-badge ${signalClass(f.signal)}">${f.signal}</span>`;
+    return `
     <div class="focus-row">
       <div class="focus-rank">${i + 1}</div>
       <div class="focus-name">${f.display}</div>
-      <span class="focus-badge ${signalClass(f.signal)}">${f.signal}</span>
+      ${badge}
       <span class="fw-600 ${colorVal(-f.z_score)}">Z ${f.z_score > 0 ? '+' : ''}${f.z_score.toFixed(2)}</span>
       <span class="text-xs dim">Score ${f.score.toFixed(1)}</span>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 function microZClass(mz) {
@@ -1295,6 +1306,15 @@ function renderInstruments(data) {
       ? `<div class="verdict-row ${verdictClass(s.english_confidence)}"><span class="verdict-label">${s.english_verdict}</span><span class="verdict-why">${s.english_why || ''}</span></div>`
       : '';
 
+    // When the English verdict is shown it supersedes the raw engine call, so
+    // drop the engine setup/conviction/signal badges entirely (they used to be
+    // merely dimmed via .verdict-priority-* CSS) — one read per card, not two
+    // contradictory ones. With no verdict, the engine signal renders as before.
+    const verdictShown = verdictRowHTML !== '';
+    const setupBadgeOut = verdictShown ? '' : setupBadge;
+    const convictionOut = verdictShown ? '' : convictionStars;
+    const signalBadgeHTML = verdictShown ? '' : `<span class="signal-badge ${sigBg}">${sigText}</span>`;
+
     // Preserve user's per-card expand state across the 4Hz re-renders.
     const isExpanded = _expandedCards.has(s.display);
     const expandedClass = isExpanded ? ' card-expanded' : '';
@@ -1325,13 +1345,13 @@ function renderInstruments(data) {
       </div>
       ${zBarHTML(s.z_score)}
       ${verdictRowHTML}
-      ${(amberTag || spikeTag || setupBadge || convictionStars) ? `<div class="mt-4">${amberTag}${spikeTag}${setupBadge}${convictionStars}</div>` : ''}
+      ${(amberTag || spikeTag || setupBadgeOut || convictionOut) ? `<div class="mt-4">${amberTag}${spikeTag}${setupBadgeOut}${convictionOut}</div>` : ''}
       ${volChips ? `<div class="mt-4">${volChips}</div>` : ''}
-      <div class="inst-signal">
-        <span class="signal-badge ${sigBg}">${sigText}</span>
+      ${(signalBadgeHTML || s.dynamic_regime || blackoutTag) ? `<div class="inst-signal">
+        ${signalBadgeHTML}
         ${s.dynamic_regime ? `<span class="text-xs warn">${s.dynamic_regime}</span>` : ''}
         ${blackoutTag}
-      </div>
+      </div>` : ''}
     </div>`;
   }).join('');
 }
