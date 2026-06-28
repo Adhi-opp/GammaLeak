@@ -101,10 +101,11 @@ sudo systemctl enable --now gammaleak-start.timer gammaleak-stop.timer \
 systemctl list-timers gammaleak-*
 ```
 
-Expected output: three timers with next-fire times in the IST 09:13 / 15:35 /
-16:00 slots on the next weekday. The 16:00 one re-derives the regime gate from
-the day's graded outcomes (rewrites `core/calibration.py`); tomorrow's 09:13
-boot picks it up automatically via `core/config.py`'s merge — no restart needed.
+Expected output: two timers (start 09:13 / stop 15:35) on the next weekday.
+The optional calibrate timer re-derives the regime gate from graded outcomes
+(writes the `data/learned_gate.json` data artifact); the next 09:13 boot picks
+it up automatically via `core/config.py`'s merge — no restart needed. Leave the
+calibrate timer **disabled** until the sample is large enough (see Step OS).
 
 Run it by hand any time to see the current table without writing the file:
 
@@ -222,11 +223,121 @@ This appends `uptime` to `/var/log/gammaleak-heartbeat.log` every hour
 
 ---
 
+## Step OS — Durable data archive to Oracle Object Storage
+
+The per-day logs are the calibration training set. By default they live only on
+the instance's block volume — which Oracle can reap. This step ships every
+closed session to Object Storage (10 GB Always Free) as one tarball per day, so
+the data survives a reap/redeploy and can be pulled back anywhere for training.
+
+> **Note on calibration:** do **not** enable `gammaleak-calibrate.timer` yet.
+> The gate needs a large accumulated sample before training is meaningful; a
+> nightly re-derive on thin data just overfits. Let data pile up in Object
+> Storage first, then run `calibrate.py` manually when the sample is big enough.
+
+### OS-1 — Create the bucket
+
+Oracle console → **Storage → Buckets → Create Bucket**. Name it
+`gammaleak-data` (Standard tier, private). Note your **Object Storage
+namespace** (shown on the bucket page) and your **region** (e.g.
+`ap-mumbai-1`).
+
+### OS-2 — Generate an S3-compatible key
+
+rclone talks to OS via its S3 endpoint, which needs a Customer Secret Key:
+
+Console → your **Profile → My profile → Customer secret keys → Generate key**.
+Copy the **Access Key** and the **Secret Key** (shown once). These map to
+rclone's `access_key_id` / `secret_access_key`.
+
+### OS-3 — Install + configure rclone (on the instance)
+
+```bash
+sudo apt install -y rclone
+mkdir -p ~/.config/rclone
+cat > ~/.config/rclone/rclone.conf <<'EOF'
+[oci]
+type = s3
+provider = Other
+env_auth = false
+access_key_id = <ACCESS_KEY_FROM_OS-2>
+secret_access_key = <SECRET_KEY_FROM_OS-2>
+region = <REGION e.g. ap-mumbai-1>
+endpoint = https://<NAMESPACE>.compat.objectstorage.<REGION>.oraclecloud.com
+acl = private
+EOF
+chmod 600 ~/.config/rclone/rclone.conf
+
+# Smoke test — should list the bucket with no error:
+rclone lsd oci:gammaleak-data
+```
+
+### OS-4 — Point the archiver at your bucket
+
+```bash
+cp /opt/gammaleak/deploy/archive.env.example /opt/gammaleak/deploy/archive.env
+# edit if your bucket name differs from the default:
+#   GAMMALEAK_OCI_BUCKET=gammaleak-data
+```
+
+### OS-5 — Test the archive by hand
+
+```bash
+cd /opt/gammaleak
+# Dry run first — shows what it would ship, uploads nothing:
+GAMMALEAK_OCI_BUCKET=gammaleak-data bash deploy/archive_to_oci.sh --dry-run --catchup
+
+# Real run — backfill every closed day you already have on disk:
+GAMMALEAK_OCI_BUCKET=gammaleak-data bash deploy/archive_to_oci.sh --catchup
+
+# Confirm objects landed:
+rclone ls oci:gammaleak-data/gammaleak/daily | tail
+```
+
+The script never deletes local data, writes a `logs/.archive_state/<date>.done`
+marker only on a verified upload, and re-tries any un-marked day on the next run.
+
+### OS-6 — Install the timer (15:45 IST, weekdays)
+
+```bash
+sudo cp /opt/gammaleak/deploy/gammaleak-archive.service /etc/systemd/system/
+sudo cp /opt/gammaleak/deploy/gammaleak-archive.timer   /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now gammaleak-archive.timer
+systemctl list-timers gammaleak-archive.timer   # confirm next-fire = next weekday 15:45 IST
+```
+
+It fires 10 min after the 15:35 stop. If the box was down at fire time,
+`Persistent=true` + the script's built-in catch-up backfill the missed days on
+the next boot — no session is ever silently lost.
+
+### OS-7 — Pulling data back for training (from anywhere)
+
+On your laptop (rclone configured the same way), grab the whole history or a
+range, then unpack:
+
+```bash
+rclone copy oci:gammaleak-data/gammaleak/daily ./training_pull --include "2026-*.tar.gz"
+for f in ./training_pull/*.tar.gz; do tar -xzf "$f" -C ./logs; done
+```
+
+### OS-8 — Optional: prune local now that it's durable
+
+Once a day is safely in Object Storage you can shrink the local volume:
+
+```bash
+# delete local per-day folders older than 30 days that have a .done marker
+0 4 * * 0 find /opt/gammaleak/logs -maxdepth 1 -type d -name '202*-*-*' -mtime +30 \
+  -exec sh -c 'test -f /opt/gammaleak/logs/.archive_state/$(basename {}).done && rm -rf {}' \;
+```
+
+---
+
 ## Daily ops
 
-**Nothing.** The engine starts 09:13 IST every weekday, stops 15:35,
-dashboard is always at `http://gammaleak:8080` from any of your
-Tailscale-connected devices.
+**Nothing.** The engine starts 09:13 IST every weekday, stops 15:35, the day's
+data is archived to Object Storage at 15:45, and the dashboard is always at
+`http://gammaleak:8080` from any of your Tailscale-connected devices.
 
 ## Weekly / monthly ops
 

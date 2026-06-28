@@ -1,0 +1,9 @@
+# Deploy artifacts execute on the Linux (Oracle Ubuntu) box — they MUST stay
+# LF regardless of the committer's OS. A shell script or systemd unit with CRLF
+# endings fails on Linux (`bash\r: No such file or directory`).
+*.sh            text eol=lf
+*.service       text eol=lf
+*.timer         text eol=lf
+*.cron          text eol=lf
+deploy/*.env*   text eol=lf
+deploy/*.yml    text eol=lf

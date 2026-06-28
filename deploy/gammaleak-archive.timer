@@ -1,0 +1,14 @@
+[Unit]
+Description=Archive GammaLeak data to Oracle Object Storage at 15:45 IST on weekdays
+
+[Timer]
+# 15:45 IST = 10min after the 15:35 engine stop, leaving slack for the final
+# per-symbol CSV + events flush. Weekdays only (no session = nothing new to ship).
+OnCalendar=Mon..Fri 15:45:00 Asia/Kolkata
+# If the box was down/reaped at fire time, run the archive (with built-in
+# catch-up) on the next boot so no closed session is ever silently dropped.
+Persistent=true
+Unit=gammaleak-archive.service
+
+[Install]
+WantedBy=timers.target

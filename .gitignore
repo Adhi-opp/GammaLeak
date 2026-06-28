@@ -6,6 +6,8 @@
 *.pem
 *.key
 oauth_tokens.json
+# Per-host archive config (bucket name + overrides); ship archive.env.example instead
+deploy/archive.env
 
 # ============================================================
 # Python

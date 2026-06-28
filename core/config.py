@@ -8,8 +8,29 @@ after boot is not config, it's state.
 """
 from __future__ import annotations
 
+import json
 from datetime import timedelta, timezone
 from pathlib import Path
+
+
+# Runtime-learned gate, emitted by calibrate.py as a data artifact (not a
+# generated .py). Path is resolved relative to this file so it's CWD-independent.
+_LEARNED_GATE_PATH = Path(__file__).resolve().parent.parent / "data" / "learned_gate.json"
+
+
+def _load_learned_gate() -> dict:
+    """Read data/learned_gate.json (calibrate.py output).
+
+    Returns {} when the file is absent or unreadable so the hand fallbacks
+    stand — same graceful-degrade the old `from core.calibration import ...`
+    had, now over a durable data file instead of a generated module.
+    """
+    try:
+        with _LEARNED_GATE_PATH.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 # --------------------------- TIME / SESSION ---------------------------
@@ -419,7 +440,7 @@ UPSTOX_CURRENCY_UNDERLYINGS = ("USDINR", "EURINR", "GBPINR", "JPYINR")
 # Tuple format: (setup_label_exact, regime_substring, action).
 # action ∈ {"BLOCK", "REQUIRE_CONV_<n>"}
 #
-# HAND_REGIME_RULES is the fallback used when core/calibration.py is absent or a
+# HAND_REGIME_RULES is the fallback used when data/learned_gate.json is absent or a
 # (setup, regime) pair is too thin for the nightly grader to have jurisdiction.
 # The effective SETUP_REGIME_RULES is the merge (see _merge_regime_rules).
 # Source of the hand rules: 4-day window 2026-05-19..22 — kept only as a floor;
@@ -445,14 +466,14 @@ def _merge_regime_rules() -> list[tuple[str, str, str]]:
     effective: dict[tuple[str, str], str] = {
         (s, r): a for s, r, a in HAND_REGIME_RULES
     }
-    try:
-        from core.calibration import CALIBRATED_REGIME_RULES, CALIBRATED_RELAX
-    except Exception:
-        return [(s, r, a) for (s, r), a in effective.items()]
-    for pair in CALIBRATED_RELAX:
-        effective.pop(tuple(pair), None)          # recovered setup — un-gate it
-    for s, r, a in CALIBRATED_REGIME_RULES:
-        effective[(s, r)] = a
+    learned = _load_learned_gate()
+    for pair in learned.get("relax", []):            # recovered setup — un-gate it
+        if len(pair) == 2:
+            effective.pop((pair[0], pair[1]), None)
+    for rule in learned.get("regime_rules", []):
+        s, r, a = rule.get("setup"), rule.get("regime"), rule.get("action")
+        if s and r and a:
+            effective[(s, r)] = a
     return [(s, r, a) for (s, r), a in effective.items()]
 
 
@@ -510,12 +531,11 @@ def _merge_conviction_weights() -> dict[str, int]:
     weight. Regenerate with: python calibrate.py
     """
     weights = dict(HAND_CONVICTION_WEIGHTS)
-    try:
-        from core.calibration import CALIBRATED_CONVICTION_WEIGHTS
-    except Exception:
-        return weights
-    for factor, w in CALIBRATED_CONVICTION_WEIGHTS.items():
-        weights[factor] = int(w)
+    for factor, w in _load_learned_gate().get("conviction_weights", {}).items():
+        try:
+            weights[factor] = int(w)
+        except (TypeError, ValueError):
+            pass
     return weights
 
 

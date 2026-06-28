@@ -1,0 +1,16 @@
+[Unit]
+Description=Archive the day's GammaLeak data to Oracle Object Storage
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/opt/gammaleak
+# Bucket name is required; remote/prefix have sane defaults in the script.
+# Put GAMMALEAK_OCI_BUCKET (and any overrides) in this env file.
+EnvironmentFile=/opt/gammaleak/deploy/archive.env
+ExecStart=/usr/bin/env bash /opt/gammaleak/deploy/archive_to_oci.sh
+# Never let a transient upload failure mark the day done — the marker is only
+# written on success, so the next run (or --catchup) retries automatically.
+TimeoutStartSec=600
