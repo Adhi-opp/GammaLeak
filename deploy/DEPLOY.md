@@ -90,14 +90,16 @@ sudo cp /opt/gammaleak/deploy/gammaleak.service           /etc/systemd/system/
 sudo cp /opt/gammaleak/deploy/gammaleak-stop.service      /etc/systemd/system/
 sudo cp /opt/gammaleak/deploy/gammaleak-start.timer       /etc/systemd/system/
 sudo cp /opt/gammaleak/deploy/gammaleak-stop.timer        /etc/systemd/system/
+# Calibrate units are copied but NOT enabled — calibration is a periodic manual
+# job that needs a large accumulated sample (see the note in Step OS). Enable
+# the timer later, once the data has piled up, if you want it automated.
 sudo cp /opt/gammaleak/deploy/gammaleak-calibrate.service /etc/systemd/system/
 sudo cp /opt/gammaleak/deploy/gammaleak-calibrate.timer   /etc/systemd/system/
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now gammaleak-start.timer gammaleak-stop.timer \
-                            gammaleak-calibrate.timer
+sudo systemctl enable --now gammaleak-start.timer gammaleak-stop.timer
 
-# Verify all three timers are registered
+# Verify the start/stop timers are registered (calibrate intentionally off)
 systemctl list-timers gammaleak-*
 ```
 
