@@ -645,6 +645,7 @@ from gammaleak_runtime.io_logs import (
     LOG_STOP,
     _safe_filename,
     append_csv_rows,
+    append_depth_row,
     append_event_row,
     disk_writer_task,
     get_events_log_path,
@@ -2406,6 +2407,32 @@ def extract_top_of_book(feed: "pb.Feed") -> tuple[float | None, float | None]:
         return None, None
 
 
+def extract_depth_levels(feed: "pb.Feed") -> tuple[str, ...] | None:
+    """B3: all five bid/ask levels from marketLevel.bidAskQuote as 20 CSV-ready
+    strings (bp,bq,ap,aq × L1..L5, zero-padded when the exchange conflates to
+    fewer levels). The engine's in-memory path still uses only L1; this exists
+    purely for the depth research log."""
+    try:
+        if feed.WhichOneof("FeedUnion") != "fullFeed":
+            return None
+        if feed.fullFeed.WhichOneof("FullFeedUnion") != "marketFF":
+            return None
+        quotes = feed.fullFeed.marketFF.marketLevel.bidAskQuote
+        if not quotes:
+            return None
+        vals: list[str] = []
+        for i in range(5):
+            if i < len(quotes):
+                q = quotes[i]
+                vals += [f"{q.bidP:.2f}", str(int(q.bidQ)),
+                         f"{q.askP:.2f}", str(int(q.askQ))]
+            else:
+                vals += ["0", "0", "0", "0"]
+        return tuple(vals)
+    except Exception:
+        return None
+
+
 def extract_option_greeks(feed: pb.Feed) -> tuple[float, float, float, float, float] | None:
     """Extract (iv, gamma, delta, tbq, tsq) from a fullFeed.marketFF message.
     Returns None for non-marketFF feeds or if data is absent. Delta (B4) was
@@ -2461,6 +2488,16 @@ async def process_message_receiver(raw, tick_queue, token_to_instrument):
             book = extract_book_pressure(feed)
             top_of_book = extract_top_of_book(feed)
             tick_queue.put_nowait((inst_key, ft, book, top_of_book, timestamp))
+
+            # B3: shadow L5 depth log (research-only, buffered, must never
+            # be able to take down the receiver).
+            if DEPTH_LOG_ENABLED:
+                depth = extract_depth_levels(feed)
+                if depth is not None:
+                    try:
+                        append_depth_row(get_display_name(inst_key), timestamp, depth)
+                    except Exception:
+                        pass
 
 
 async def compute_worker(tick_queue, log_queue):

@@ -613,6 +613,26 @@ EXPIRY_LOG_COLUMNS = (
     "mins_to_close",    # minutes until EXPIRY_SETTLE_END
 )
 
+# B3: L5 depth logging (shadow, research-only). The "full" feed already
+# delivers 5 levels per side; the engine keeps only L1 in memory. Every
+# marketFF tick for a core (symbol_states) instrument appends one row to
+# logs/YYYY-MM-DD/<SYM>.depth.csv — dot in the stem so the tick-writer schema
+# sentinel and the integrity census both ignore it. Buffered writes; a crash
+# loses at most the last DEPTH_FLUSH_SECS of depth (never tick data).
+# Purpose: real queue-imbalance / sweep detection to replace the failed
+# L1-only toxicity proxy, and spoof/absorption research.
+DEPTH_LOG_ENABLED = True
+DEPTH_FLUSH_ROWS = 100        # per-symbol buffer flush threshold
+DEPTH_FLUSH_SECS = 10.0       # ... or at least this often (global check)
+DEPTH_LOG_COLUMNS = (
+    "timestamp",
+    "bp1", "bq1", "ap1", "aq1",
+    "bp2", "bq2", "ap2", "aq2",
+    "bp3", "bq3", "ap3", "aq3",
+    "bp4", "bq4", "ap4", "aq4",
+    "bp5", "bq5", "ap5", "aq5",
+)
+
 # Session phases for time-of-day conditioning (IST, half-open [start, end)).
 SESSION_PHASES: tuple[tuple[tuple[int, int], tuple[int, int], str], ...] = (
     ((9, 15), (10, 0), "OPEN"),      # retail-heavy price discovery

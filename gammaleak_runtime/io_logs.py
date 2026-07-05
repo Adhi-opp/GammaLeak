@@ -22,6 +22,7 @@ from pathlib import Path
 # `__main__` and `GammaLeak`, so re-importing it re-runs top-level
 # code mid-load).
 from core.config import (
+    DEPTH_FLUSH_ROWS, DEPTH_FLUSH_SECS, DEPTH_LOG_COLUMNS,
     EVENT_LOG_COLUMNS, EXPIRY_LOG_COLUMNS, GEX_LOG_COLUMNS, IST,
     LOG_BATCH_SIZE, LOG_COLUMNS, LOG_DIR, LOG_FLUSH_INTERVAL_SECS,
     OI_STATE_LOG_COLUMNS,
@@ -196,6 +197,50 @@ def append_expiry_row(
         if write_header:
             writer.writerow(EXPIRY_LOG_COLUMNS)
         writer.writerow(row)
+
+
+def get_depth_log_path(symbol: str, trading_day: date | None = None) -> Path:
+    """B3: logs/<date>/<SYM>.depth.csv — the dot in the stem keeps this file
+    invisible to disk_writer_task's schema sentinel and the integrity census
+    (both skip dotted stems as archived/non-canonical)."""
+    return get_log_dir(trading_day) / f"{_safe_filename(symbol)}.depth.csv"
+
+
+# B3 depth buffers: symbol -> pending rows. Flushed from the feed-receiver
+# thread when a symbol's buffer hits DEPTH_FLUSH_ROWS or DEPTH_FLUSH_SECS has
+# elapsed since the last global flush. Deliberately synchronous + tiny: worst
+# case a few small appends per second, and a crash costs only the buffered
+# tail of the *depth* file — never tick rows, which use disk_writer_task.
+_depth_buffers: dict[str, list[tuple[str, ...]]] = {}
+_depth_last_flush: float = 0.0
+
+
+def _flush_depth_buffers() -> None:
+    for sym, rows in list(_depth_buffers.items()):
+        if not rows:
+            continue
+        path = get_depth_log_path(sym)
+        write_header = not path.exists()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            if write_header:
+                writer.writerow(DEPTH_LOG_COLUMNS)
+            writer.writerows(rows)
+    _depth_buffers.clear()
+
+
+def append_depth_row(symbol: str, timestamp: float, depth: tuple[str, ...]) -> None:
+    """Buffer one L5 depth row (20 price/qty strings from
+    extract_depth_levels) and flush on size or age. Callers wrap in
+    try/except — a disk hiccup must never touch the feed receiver."""
+    global _depth_last_flush
+    _depth_buffers.setdefault(symbol, []).append((f"{timestamp:.3f}",) + depth)
+    now = time.monotonic()
+    if (len(_depth_buffers[symbol]) >= DEPTH_FLUSH_ROWS
+            or now - _depth_last_flush >= DEPTH_FLUSH_SECS):
+        _flush_depth_buffers()
+        _depth_last_flush = now
 
 
 def append_csv_rows(
