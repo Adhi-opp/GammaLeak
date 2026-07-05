@@ -30,7 +30,7 @@
 - **Domain depth** — Lee-Ready aggressor classification (tick rule + midpoint refinement on zero-tick), cumulative volume delta with **pullback-validated** exhaustion detectors (kills gap-day false fires), OI-delta flow classification (NEW LONGS / NEW SHORTS / SHORT COVER / LONG EXIT), max-pain + gamma-wall anchors, spot-to-FUT verdict mirroring so spot cards inherit flow context from the volume-bearing futures leg.
 - **Full-stack execution** — async FastAPI backend, vanilla-JS dashboard with anchored OI-flow velocity chart and CSS-driven verdict-priority demotion, OAuth daily-JWT refresh script, Docker compose.
 - **Self-calibrating feedback loop** — `calibrate.py` grades every confirmed signal and every counterfactually-evaluated regime-blocked entry (uncensored population) by 10-min forward MFE, then re-derives regime suppression rules and conviction factor weights nightly. Asymmetric merge policy: tighten gate rules aggressively on underperformers, relax only when the recovered hit rate clears a statistical threshold. Automated discovery of stale hand-tuned rules without manual review.
-- **Evidence-driven conviction scoring** — replaced the flat +1-per-factor model with lift-weighted scoring measured from graded outcomes. Per-factor MFE lift computed across sessions (EXH +21 pp → weight 2, DIV +12 pp → weight 1); non-predictive factors held at 0. All active factors written to `conv_factors` column in `events.csv` for ongoing nightly re-derivation. Validated at **79% MFE hit rate across 121 confirmed signals** on fresh Upstox 1-min historical API data (19 sessions, 6 instruments).
+- **Evidence-driven conviction scoring** — replaced the flat +1-per-factor model with lift-weighted scoring measured from graded outcomes. Per-factor MFE lift computed across sessions (EXH +13 pp on 16 sessions → weight; anti-predictive factors zeroed, e.g. DRIFT at −37 pp). All active factors written to `conv_factors` column in `events.csv` for ongoing nightly re-derivation. Honest baseline: **~43% uncensored MFE hit rate across 320 graded live CONFIRMs** (16 sessions). An earlier headline of 79% from `backtest_api.py` was a grading-convention artifact (entry priced at ALERT instead of CONFIRM — re-counting the move that triggered confirmation); the fixed, tradeable-fill convention reads 22% on the same fires and now also reports MAE.
 
 ## Architecture
 
@@ -290,7 +290,7 @@ python backtest_api.py                # runs all configured symbols
 
 Uses front-month futures keys (not spot) for NIFTY, BANKNIFTY, SENSEX to avoid zero-volume index bars that break VWAP. Falls back to equal-weight mean for any residual zero-volume candles. Output: per-symbol hit rate breakdown, per-setup breakdown, per-conviction-score breakdown, per-factor lift table.
 
-**Validated result (May 4–29 2026, 19 sessions):** **79% MFE hit rate across 121 confirmed signals**, 6 instruments. SENSEX_FUT strongest at 88%.
+**Result under the fixed grading convention (May 4–29 2026, 19 sessions):** **22% MFE hit rate across 120 confirmed signals** (entry = CONFIRM close, same-session forward window, MAE reported: avg MFE 25.4 pts vs avg MAE 36.8 pts). The previously published 79% graded from the ALERT price — an untradeable fill that re-counted the move which triggered confirmation — and is retracted (audit 2026-07-03).
 
 ### 5. FII/DII Scraper
 
@@ -604,17 +604,21 @@ A signal is graded **OK** if max favourable excursion in the 10-minute window af
 |---|---|---|---|
 | Internal logs — baseline (no gate), 4 sessions | 56 / 137 | 40.9% | From persisted events.csv |
 | Internal logs — with hand-tuned regime gate, 4 sessions | 48 / 103 | **46.6%** (+5.7pp) | Gate blocks ORB BREAK L\|NORMAL; requires conv≥4 for EXHAUSTION REV S\|NORMAL |
-| **API candles — calibrated pipeline, 19 sessions** | **95 / 121** | **79%** | Fresh Upstox REST data, independent of logs |
+| Internal logs — uncensored population, 16 sessions | 139 / 320 | **43%** | CONFIRMs + counterfactually graded blocks, `calibrate.py` |
+| API candles — **fixed** tradeable-fill grading, 19 sessions | 27 / 120 | **22%** | Entry = CONFIRM close, same-session window; avg MFE 25.4 vs avg MAE 36.8 pts |
 
-API backtest by symbol (19-session blend):
+> **Retraction (2026-07-03):** an earlier version of this table reported **79% (95/121)** for the API backtest. That number graded forward MFE from the ALERT price while confirmation itself required the favorable move to have already happened — 83% of "wins" were banked before the signal existed. It is not comparable to any tradeable process and is retracted.
+
+API backtest by symbol (fixed convention, 19-session blend):
 
 | Symbol | OK / N | Rate |
 |---|---|---|
-| SENSEX_FUT | — | **88%** |
-| NIFTY_FUT | — | ~79% |
-| BANKNIFTY_FUT | — | ~77% |
-| NIFTY | — | ~74% |
-| BANKNIFTY | — | ~71% |
+| BANKNIFTY | 6 / 16 | 38% |
+| NIFTY_FUT | 7 / 27 | 26% |
+| BANKNIFTY_FUT | 7 / 31 | 23% |
+| SENSEX_FUT | 3 / 16 | 19% |
+| NIFTY | 3 / 20 | 15% |
+| SENSEX | 1 / 10 | 10% |
 
 Volume cost of the hand gate (4-session sample): −8.5 signals/day; of 34 historical blocks, 26 were WEAK (correctly dropped) and 8 were OK (collateral damage). Net: ~3.25:1 ratio of false-positives blocked vs OK sacrificed.
 
@@ -665,7 +669,7 @@ Index futures (BN\_FUT, NIFTY\_FUT) carry the engine; equity/commodity floors ne
 | V5.1 | Apr 16, 2026 | Per-strike OI Δ flow classification |
 | V5.2 | Apr 20, 2026 | Micro-Structural Layer (Micro-Z / Z-velocity / Tick-rate / Driver acceleration) + FastAPI browser dashboard + self-healing instrument master |
 | V5.3 | May 2026 | Events.csv writer (sig_state transitions persisted); MFE-graded backtest harness (10-min forward window, per-symbol noise floor, ATR-scaled with K=0.5); OI-Flow state mirror (`logs/<date>_oi_state.csv`) + retroactive `analyze_oi_chart.py`; regime-gated CONFIRM filter (+5.7pp hit-rate lift on 4-session sample); two-pane OI Flow chart with render throttling, Y-clamp, area fills; collapsible per-card math dropdown; Phase 1 OFI observational layer (ΔTBQ−ΔTSQ + 4-quadrant absorption tag, no engine action) |
-| V5.4 | May 2026 | **Self-calibrating feedback loop:** `calibrate.py` nightly grader (16:00 IST, Mon–Fri via systemd); grades CONFIRMs + counterfactually-evaluated REGIME_BLOCK aborts (uncensored population) by 10-min MFE; auto-derives gate rules with asymmetric merge policy; auto-relaxed stale EXHAUSTION REV S\|NORMAL rule (26% → 54% over 8 sessions). **Predictive conviction model:** rebuilt `compute_conviction_score` as lift-weighted (EXH +21pp→weight 2, DIV +12pp→1); added CVD-divergence DIV factor; `conv_factors` column in events.csv feeds nightly re-derivation. **API backtester** (`backtest_api.py`): validated at **79% MFE hit rate / 121 signals / 19 sessions** on fresh Upstox 1-min historical data. **SENSEX** added as first-class instrument (BSE_FO front-month FUT). |
+| V5.4 | May 2026 | **Self-calibrating feedback loop:** `calibrate.py` nightly grader (16:00 IST, Mon–Fri via systemd); grades CONFIRMs + counterfactually-evaluated REGIME_BLOCK aborts (uncensored population) by 10-min MFE; auto-derives gate rules with asymmetric merge policy; auto-relaxed stale EXHAUSTION REV S\|NORMAL rule (26% → 54% over 8 sessions). **Predictive conviction model:** rebuilt `compute_conviction_score` as lift-weighted (EXH +21pp→weight 2, DIV +12pp→1); added CVD-divergence DIV factor; `conv_factors` column in events.csv feeds nightly re-derivation. **API backtester** (`backtest_api.py`): initially reported **79% MFE hit rate / 121 signals / 19 sessions** — later found to be a grading-convention artifact and retracted 2026-07-03 (tradeable-fill convention: 22%; see Measured Performance). **SENSEX** added as first-class instrument (BSE_FO front-month FUT). |
 | V5.5 | Jun 2026 | **Live vol surface:** `analytics/vol_surface.py` + `signals/vol_regime.py` — ATM IV (CE+PE mean), 25Δ skew proxy (OTM put − call IV at ATM±100 pts), IV percentile vs rolling 30-session baseline; IV values read directly from Upstox protobuf `mf.iv` field (no Black-Scholes inversion). `VOL` conviction factor (weight 0 observational). **Expiry-aware:** expiry-day session-open IV excluded from history baseline; post-13:00 vol crush labelled `EXPIRY` so `LOW_IV`-gated logic (VOL factor, future ATR floor) doesn't fire spuriously on structural vol collapse. **Dashboard:** IV chip (`IV 14.2% [L/N/H/E]`) + skew chip (`+2.3pp FEAR`) on NIFTY card; full ATM IV + raw percentile + skew in `▸ math` dropdown. **Pre-live fixes:** `_latest_iv` walks backwards past trailing iv=0 ticks; bootloader stamps expiry ISO date for session guards. |
 
 ---
