@@ -26,6 +26,11 @@ from core.config import (
 
 TickData = namedtuple("TickData", ["timestamp", "ltp", "volume"])
 
+# Decoded per-message feed payload (B1): everything extract_feed_metrics pulls
+# from one protobuf Feed. ltt = exchange last-trade time (epoch ms) — logged
+# beside arrival time so clock skew is measurable; ltq = last trade quantity.
+FeedTick = namedtuple("FeedTick", ["ltp", "vtt", "oi", "ltt", "ltq"])
+
 
 @dataclass
 class SymbolState:
@@ -47,6 +52,8 @@ class SymbolState:
     std_dev: float = 0.0
     z_score: float = 0.0
     ltp: float = 0.0
+    ltt: int = 0                     # exchange last-trade time (epoch ms; 0 = n/a)
+    ltq: int = 0                     # last trade quantity (0 = n/a)
     ltp_style: str = "white"
     action_signal: str = SIGNAL_WARMING_UP
     action_style: str = "dim white"
@@ -179,6 +186,26 @@ class SymbolState:
     last_completed_minute_delta: int = 0       # last bar's (buy - sell) — used for breakout confirmation
     recent_minute_deltas: deque = field(default_factory=lambda: deque(maxlen=10))
 
+    # Shadow flow-toxicity (P1, observational): trailing |ΔCVD| / ΔVolume over
+    # TOX_WINDOW_SECS, from (ts, cvd, cum_volume) snapshots every
+    # TOX_SNAPSHOT_SECS. -1.0 = unavailable (no volume feed, e.g. spot indices).
+    _flow_snapshots: deque = field(default_factory=lambda: deque(maxlen=64))
+    flow_toxicity: float = -1.0
+
+    # Shadow net dealer gamma (P2, observational; NIFTY spot state only —
+    # refreshed by orderflow/gex.py every GEX_SNAPSHOT_SECS). None until the
+    # option chain delivers live greeks. Sign model unvalidated — see gex.py.
+    gex_ce: float | None = None
+    gex_pe: float | None = None
+    gex_net_1pct: float | None = None
+
+    # Shadow expiry anchor (P4, observational; NIFTY spot only, expiry day
+    # only — orderflow/expiry.py). settle_est = running estimate of the
+    # exchange settlement average (15:00–15:30); pin = max gamma-mass strike.
+    expiry_settle_est: float | None = None
+    expiry_pin_strike: int = 0
+    expiry_pin_dist: float | None = None
+
     # Divergence detection state
     session_high_tracked: float = 0.0
     session_low_tracked: float = 0.0
@@ -212,6 +239,23 @@ class SymbolState:
     vol_regime: str = ""                        # LOW_IV | NORMAL_IV | HIGH_IV
     skew_state: str = ""                        # FEAR | NEUTRAL | COMPLACENCY
     _last_vol_surface_ts: float = 0.0          # throttle stamp — do not serialise
+
+
+@dataclass
+class PositioningState:
+    """Daily dealer/participant positioning anchor (Phase A, shadow).
+
+    Populated at engine boot from data/participant_history.csv via
+    positioning.anchor.anchor_for(today) — i.e. always the T-1 file
+    (publication lag). Plain fields only so core/ stays import-light;
+    the derivation lives in positioning/anchor.py.
+    """
+    loaded: bool = False
+    as_of: str = ""                        # ISO date of the anchor row (T-1)
+    dealer_short_gamma_score: float = 0.0  # >0: dealers short gamma (trend-friendly)
+    client_net_opt: int = 0                # retail net-long option contracts
+    fii_fut_net: int = 0                   # P9 prior inputs
+    dii_fut_net: int = 0
 
 
 @dataclass
@@ -249,6 +293,10 @@ class PCRState:
     # V4.0: Per-strike LTP + rolling OI history for Rate of Change
     ce_ltp_by_strike: dict[int, float] = field(default_factory=dict)
     pe_ltp_by_strike: dict[int, float] = field(default_factory=dict)
+
+    # B4: latest per-side delta per strike (feed-signed: CE +, PE −)
+    delta_by_strike_ce: dict[int, float] = field(default_factory=dict)
+    delta_by_strike_pe: dict[int, float] = field(default_factory=dict)
     oi_history_ce: dict[int, deque] = field(default_factory=dict)  # deque of (ts, oi)
     oi_history_pe: dict[int, deque] = field(default_factory=dict)  # deque of (ts, oi)
 

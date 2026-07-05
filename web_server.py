@@ -176,6 +176,12 @@ async def run_engine_headless(mock: bool = False) -> None:
         except Exception as exc:
             log.warning("FII/DII fetch failed: %s", exc)
 
+    # Phase A dealer-positioning anchor: upserts today's participant row and
+    # loads the T-1 anchor. Must run here too — the production service boots
+    # through this headless path, not run_live_mode.
+    anchor_ok, anchor_msg = engine.boot_positioning_anchor()
+    (log.info if anchor_ok else log.warning)("%s", anchor_msg)
+
     # Sonar news engine
     if engine.SONAR_ENABLED and engine._SONAR_AVAILABLE:
         engine._sonar_engine = engine.SonarNewsEngine(cooldown_secs=engine.SONAR_COOLDOWN_SECS)

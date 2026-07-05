@@ -95,6 +95,10 @@ archive_date() {
     local members=( "${d}" )
     [ -f "${LOG_DIR}/${d}_events.csv" ]   && members+=( "${d}_events.csv" )
     [ -f "${LOG_DIR}/${d}_oi_state.csv" ] && members+=( "${d}_oi_state.csv" )
+    # Shadow research artifacts (2026-07: P2 per-strike dealer-gamma snapshots,
+    # P4 expiry settlement-anchor track — expiry file exists only on Tuesdays)
+    [ -f "${LOG_DIR}/${d}_gex.csv" ]      && members+=( "${d}_gex.csv" )
+    [ -f "${LOG_DIR}/${d}_expiry.csv" ]   && members+=( "${d}_expiry.csv" )
     # Point-in-time copy of the cumulative IV history travels in the tarball too.
     [ -f "${LOG_DIR}/iv_session_history.csv" ] && members+=( "iv_session_history.csv" )
 
@@ -126,6 +130,9 @@ sync_state() {
     local -a pairs=(
         "${LOG_DIR}/iv_session_history.csv|${REMOTE_BASE}/state/iv_session_history.csv"
         "${HOME_DIR}/data/learned_gate.json|${REMOTE_BASE}/state/learned_gate.json"
+        # 3-year participant-OI backfill + daily upserts (positioning/anchor.py)
+        # — gitignored data/, so this is its only durable home besides the box.
+        "${HOME_DIR}/data/participant_history.csv|${REMOTE_BASE}/state/participant_history.csv"
     )
     local entry src dst
     for entry in "${pairs[@]}"; do

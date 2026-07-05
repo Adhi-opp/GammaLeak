@@ -39,12 +39,14 @@ from datetime import datetime
 import numpy as np
 
 from core.config import (
+    IST,
     MIN_FAVORABLE_POINTS_PER_SYMBOL,
     MFE_ATR_K,
     REVIEW_DEFAULT_MIN_FAVORABLE_PCT,
     ER_TREND_THRESHOLD,
     HURST_THRESHOLD,
     HAND_CONVICTION_WEIGHTS,
+    session_phase,
 )
 
 # ----------------------------- KNOBS -----------------------------
@@ -52,6 +54,9 @@ FWD_WINDOW_SECS = 600           # 10-min forward MFE window (engine design inten
 ATR_PROXY_WINDOW_SECS = 300     # prior-5-min realised range = ATR proxy
 MIN_FWD_POINTS = 5              # need at least this many forward ticks to grade
 MIN_FWD_SPAN_SECS = 120         # ...and at least this much forward time
+MAX_FWD_GAP_SECS = 180          # a feed outage inside the window hides excursion —
+                                # the fire is UNGRADABLE, not a loss (integrity
+                                # census 2026-07-05: 13/322 confirms affected)
 
 MIN_SAMPLE_GATE = 10            # a (setup,regime) pair needs n>=this for a rule
 BLOCK_BELOW = 0.25              # pooled hit-rate < this  -> BLOCK
@@ -198,6 +203,23 @@ def grade_fire(
         return None
     if float(ts[min(k, ts.size) - 1]) - fire_ts < MIN_FWD_SPAN_SECS:
         return None
+    # Integrity guards: a feed gap inside the forward window can hide the
+    # favorable excursion entirely — grade would read as a spurious loss.
+    # (a) internal gap between window ticks; (b) tail truncation — the window
+    # should run to fire+FWD or session close, whichever is earlier; if the
+    # last tick stops well short of that, the feed died (2026-05-15 / 07-03
+    # outages), which is NOT the same as a fire near the close.
+    fwd_ts = ts[j:k]
+    if fwd_ts.size >= 2 and float(np.diff(fwd_ts).max()) > MAX_FWD_GAP_SECS:
+        return None
+    try:
+        _close_ts = datetime.strptime(date_str, "%Y-%m-%d").replace(
+            hour=15, minute=30, tzinfo=IST).timestamp()
+    except ValueError:
+        _close_ts = fire_ts + FWD_WINDOW_SECS
+    expected_end = min(fire_ts + FWD_WINDOW_SECS, _close_ts)
+    if expected_end - float(fwd_ts[-1]) > MAX_FWD_GAP_SECS:
+        return None
 
     # MFE in the fade direction (engine convention: side>0 stretched high, the
     # trade is short, so favorable = entry - min).
@@ -251,8 +273,38 @@ def collect(files: list[str]):
     sym_mfe: dict[str, list[float]] = defaultdict(list)   # per-symbol MFE magnitudes
     # factor -> {True: [wins...], False: [wins...]} for present/absent lift
     factor_lift: dict[str, dict[bool, list[int]]] = defaultdict(lambda: {True: [], False: []})
+    # Shadow conditioning (observational — reported, never turned into rules here):
+    #   phase_pop: session phase -> [win...] for graded CONFIRMs (phase derived
+    #     from the fire timestamp, so it covers pre-instrumentation sessions too)
+    #   tox_pop:   [(toxicity, win)] for CONFIRMs whose row logged a toxicity
+    #   trend_kills: trend-gate counterfactuals — TREND_KILL aborts graded from
+    #     kill-time price ("did the killed fade candidate revert anyway?")
+    phase_pop: dict[str, list[int]] = defaultdict(list)
+    tox_pop: list[tuple[float, int]] = []
+    gex_pop: list[tuple[float, int]] = []                   # (net_gex_1pct, win)
+    anchor_pop: list[tuple[float, int]] = []                # (T-1 dealer score, win)
+    trend_kills: dict[str, list[int]] = defaultdict(list)   # ER/HURST/ER+HURST -> [win...]
     ungraded = 0
     total_confirms = 0
+
+    # Positioning anchor by session date (publication-lagged; join needs no
+    # event-schema column — the date is the key). Missing table -> empty dict.
+    try:
+        from positioning.anchor import load_history as _load_anchor_history
+        _anchor_rows = _load_anchor_history()
+        _anchor_dates = sorted(_anchor_rows)
+    except Exception:
+        _anchor_rows, _anchor_dates = {}, []
+
+    def _anchor_score_for(day_iso: str) -> float | None:
+        import bisect
+        i = bisect.bisect_left(_anchor_dates, day_iso)
+        if i == 0:
+            return None
+        try:
+            return float(_anchor_rows[_anchor_dates[i - 1]]["dealer_short_gamma_score"] or 0.0)
+        except (KeyError, ValueError):
+            return None
 
     for fpath in files:
         m = re.search(r"(\d{4}-\d{2}-\d{2})_events\.csv$", os.path.basename(fpath))
@@ -286,6 +338,26 @@ def collect(files: list[str]):
                     population[(setup, rb)].append((conv, int(win), False))
                     sym_mfe[symbol].append(mfe)
 
+                    # Shadow conditioning tallies (P3 time-of-day / P1 toxicity)
+                    ph = session_phase(datetime.fromtimestamp(fire_ts, IST))
+                    if ph:
+                        phase_pop[ph].append(int(win))
+                    tox_raw = (row.get("toxicity") or "").strip()
+                    if tox_raw:
+                        try:
+                            tox_pop.append((float(tox_raw), int(win)))
+                        except ValueError:
+                            pass
+                    gex_raw = (row.get("gex") or "").strip()
+                    if gex_raw:
+                        try:
+                            gex_pop.append((float(gex_raw), int(win)))
+                        except ValueError:
+                            pass
+                    _a = _anchor_score_for(date_str)
+                    if _a is not None:
+                        anchor_pop.append((_a, int(win)))
+
                     # Per-factor lift: use the logged conv_factors when the column
                     # exists (None == pre-instrumentation session -> reconstruct).
                     cf = row.get("conv_factors")
@@ -312,7 +384,33 @@ def collect(files: list[str]):
                     _mfe, _floor, win = g
                     population[(orig_setup, rb)].append((-1, int(win), True))
 
-    return population, sym_mfe, factor_lift, ungraded, total_confirms
+                elif etype == "ABORT" and setup.startswith("TREND_KILL:"):
+                    # Trend-gate counterfactual: an ALERT the ER/Hurst gate killed.
+                    # Graded from kill-time price — NOT pooled with CONFIRMs (a
+                    # kill happens mid-alert, a confirm at the Z re-cross), so it
+                    # lives in its own diagnostic table. A high win rate here
+                    # means the trend gate is suppressing recoverable fades.
+                    g = grade_fire(date_str, symbol, side, entry, fire_ts)
+                    if g is None:
+                        continue
+                    _mfe, _floor, win = g
+                    trend_kills[setup.split(":", 1)[1].strip()].append(int(win))
+
+    # Trailing ~1y tercile cuts of the positioning score itself (outcome-blind)
+    anchor_cuts = None
+    if len(_anchor_dates) >= 60:
+        try:
+            recent = [float(_anchor_rows[d]["dealer_short_gamma_score"] or 0.0)
+                      for d in _anchor_dates[-252:]]
+            recent.sort()
+            anchor_cuts = (recent[len(recent) // 3], recent[2 * len(recent) // 3])
+        except (KeyError, ValueError):
+            pass
+
+    shadow = {"phase": phase_pop, "tox": tox_pop, "gex": gex_pop,
+              "anchor": anchor_pop, "anchor_cuts": anchor_cuts,
+              "trend_kills": trend_kills}
+    return population, sym_mfe, factor_lift, ungraded, total_confirms, shadow
 
 
 # ----------------------------- RULE / FLOOR DERIVATION -----------------------------
@@ -469,6 +567,90 @@ def write_calibration(rules, relax, conv_weights, floors, n_sessions, total_conf
 
 # ----------------------------- REPORT -----------------------------
 
+def print_shadow_report(shadow) -> None:
+    """Observational conditioning tables — measured nightly, gate nothing.
+
+    Promotion path is shadow -> paper -> live: a phase/toxicity rule may only
+    graduate into the gate after it shows a stable split across walk-forward
+    folds, not because one aggregate table looks good.
+    """
+    print("\nSHADOW CONDITIONING (observational — no rules derived):")
+
+    phase_pop = shadow.get("phase", {})
+    if phase_pop:
+        print("  Time-of-day phase (graded CONFIRMs, phase from fire ts):")
+        for ph in ("OPEN", "MORNING", "LUNCH", "EUROPE", "CLOSE"):
+            wins = phase_pop.get(ph)
+            if not wins:
+                continue
+            n = len(wins)
+            print(f"    {ph:<8} {sum(wins):3d}/{n:<3d} = {sum(wins)/n*100:3.0f}%")
+
+    tox = shadow.get("tox", [])
+    if len(tox) >= 15:
+        vals = sorted(t for t, _w in tox)
+        lo_cut = vals[len(vals) // 3]
+        hi_cut = vals[2 * len(vals) // 3]
+        buckets = {"low": [], "mid": [], "high": []}
+        for t, w in tox:
+            k = "low" if t < lo_cut else ("high" if t >= hi_cut else "mid")
+            buckets[k].append(w)
+        print(f"  Flow-toxicity terciles (cuts {lo_cut:.3f}/{hi_cut:.3f}, n={len(tox)}):")
+        for k in ("low", "mid", "high"):
+            b = buckets[k]
+            if b:
+                print(f"    {k:<8} {sum(b):3d}/{len(b):<3d} = {sum(b)/len(b)*100:3.0f}%")
+    elif tox:
+        print(f"  Flow-toxicity: collecting — n={len(tox)} instrumented CONFIRMs (need 15)")
+
+    anch = shadow.get("anchor", [])
+    if len(anch) >= 15:
+        # Retail-write intensity: −dealer_short_gamma_score (A4 study 2026-07-04:
+        # heavier retail option-writing → trendier next session, CI-solid over
+        # 719 sessions). Hypothesis for THIS table: heavy-write days are
+        # fade-hostile → lower confirm hit. Tercile cuts come from the trailing
+        # ~1 year of the POSITIONING history (regime-adaptive, outcome-blind) —
+        # a fixed 3-year cut left 95% of recent sessions in one bucket.
+        cuts = shadow.get("anchor_cuts")
+        if cuts:
+            lo_cut, hi_cut = cuts
+            b3 = {"heavy-write (trend-risk)": [], "mid": [], "light-write": []}
+            for score, w in anch:
+                k = ("heavy-write (trend-risk)" if score <= lo_cut
+                     else ("light-write" if score > hi_cut else "mid"))
+                b3[k].append(w)
+            print(f"  Retail option-write intensity (anchor by session date, n={len(anch)},")
+            print(f"  trailing-1y tercile cuts {lo_cut:+.4f}/{hi_cut:+.4f}):")
+            for label in ("heavy-write (trend-risk)", "mid", "light-write"):
+                b = b3[label]
+                if b:
+                    print(f"    {label:<25} {sum(b):3d}/{len(b):<3d} = {sum(b)/len(b)*100:3.0f}%")
+    elif anch:
+        print(f"  Retail-write anchor: collecting — n={len(anch)} joined CONFIRMs (need 15)")
+
+    gex = shadow.get("gex", [])
+    if len(gex) >= 15:
+        # Primary read is the SIGN (long vs short dealer gamma under the SPX
+        # convention); magnitude terciles can come once the sign shows signal.
+        pos = [w for g, w in gex if g > 0]
+        neg = [w for g, w in gex if g <= 0]
+        print(f"  Dealer gamma sign (NIFTY net GEX at fire, n={len(gex)}):")
+        for label, b in (("long (net>0)", pos), ("short (net<=0)", neg)):
+            if b:
+                print(f"    {label:<15} {sum(b):3d}/{len(b):<3d} = {sum(b)/len(b)*100:3.0f}%")
+    elif gex:
+        print(f"  Dealer gamma: collecting — n={len(gex)} instrumented CONFIRMs (need 15)")
+
+    kills = shadow.get("trend_kills", {})
+    if kills:
+        print("  TREND-GATE COUNTERFACTUAL (graded TREND_KILL aborts; win = the")
+        print("  killed fade would have cleared the MFE floor from kill price):")
+        for tag in sorted(kills):
+            wins = kills[tag]
+            n = len(wins)
+            print(f"    {tag:<9} {sum(wins):3d}/{n:<3d} = {sum(wins)/n*100:3.0f}%")
+
+
 def print_report(population, rules, relax, factor_lift, conv_weights, floors, ungraded, total_confirms, n_sessions):
     print(f"\n{'='*70}")
     print(f"CALIBRATION  —  {n_sessions} sessions, {total_confirms} CONFIRMs "
@@ -562,7 +744,7 @@ def main() -> int:
         print("No logs/*_events.csv found.")
         return 1
 
-    population, sym_mfe, factor_lift, ungraded, total_confirms = collect(files)
+    population, sym_mfe, factor_lift, ungraded, total_confirms, shadow = collect(files)
     rules, relax = derive_rules(population)
     conv_weights = derive_conviction_weights(factor_lift)
     floors = derive_floors(sym_mfe)
@@ -570,6 +752,7 @@ def main() -> int:
 
     print_report(population, rules, relax, factor_lift, conv_weights, floors,
                  ungraded, total_confirms, n_sessions)
+    print_shadow_report(shadow)
 
     if args.dry_run:
         print("--dry-run: data/learned_gate.json NOT written.")

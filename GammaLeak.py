@@ -1141,11 +1141,29 @@ def _load_event_calendar() -> list[tuple[datetime, str]]:
     return events
 
 
+def is_expiry_session(now_ist: datetime) -> bool:
+    """True when today IS the resolved NIFTY weekly expiry date.
+
+    Keyed to the instrument-master-resolved expiry (set by the bootloader via
+    analytics.vol_surface.set_expiry_date) rather than a weekday constant —
+    NSE moved NIFTY weeklies to Tuesday in Sept 2025 and the old hardcoded
+    Thursday check mislabeled every EXPIRY PIN through 2026-06. Falls back to
+    the (corrected) weekday constant only when no expiry is resolved yet
+    (preflight / mock mode).
+    """
+    from analytics.vol_surface import get_expiry_date  # lazy — avoids import-order coupling
+    expiry = get_expiry_date()
+    if expiry is not None:
+        return now_ist.date() == expiry
+    return now_ist.weekday() == EXPIRY_BLACKOUT_WEEKDAY
+
+
 def check_event_blackout(now_ist: datetime) -> str:
     """Return blackout reason (non-empty) if we're inside a blackout window.
-    Covers (a) scheduled macro events ±15min, (b) weekly Thu expiry pin 15:00–15:30."""
+    Covers (a) scheduled macro events ±15min, (b) weekly expiry pin 15:00–15:30
+    on the resolved expiry date."""
     # Weekly expiry pin
-    if now_ist.weekday() == EXPIRY_BLACKOUT_WEEKDAY:
+    if is_expiry_session(now_ist):
         start_h, start_m = EXPIRY_BLACKOUT_START
         end_h, end_m = EXPIRY_BLACKOUT_END
         cur_mins = now_ist.hour * 60 + now_ist.minute
@@ -1228,8 +1246,8 @@ def classify_setup_label(
 ) -> str:
     """Pick a named setup based on current context. side = Z-direction (stretch side).
     The fade trade direction is -side (long when Z negative, short when Z positive)."""
-    # Expiry pin session on Thursday afternoon
-    if now_ist.weekday() == EXPIRY_BLACKOUT_WEEKDAY and now_ist.hour >= 14:
+    # Expiry pin session — resolved-expiry-date afternoon (not a weekday constant)
+    if is_expiry_session(now_ist) and now_ist.hour >= 14:
         return SETUP_EXPIRY_PIN
 
     abs_peak = abs(peak_z)
@@ -1310,6 +1328,7 @@ def is_cross_asset_suppressed(instrument_key: str) -> bool:
 
 # check_gamma_flush moved to orderflow/gamma.py.
 from orderflow.gamma import check_gamma_flush  # noqa: F401
+from orderflow.expiry import update_expiry_anchor  # P4 shadow tracker
 
 
 # ========================= V4.0: ADAPTIVE REGIME ENGINE =========================
@@ -1518,6 +1537,28 @@ def _block_confirm_promotion(state: SymbolState, now_ts: float, reason: str) -> 
     state.setup_label = f"REGIME_BLOCK:{reason}"
 
 
+def _event_gex() -> float | None:
+    """NIFTY net dealer gamma at event time — logged on every event row as
+    market-wide context (the chain is NIFTY's; other symbols inherit it the
+    same way they inherit the regime backdrop). None until first compute."""
+    ns = symbol_states.get("NSE_INDEX|Nifty 50")
+    return ns.gex_net_1pct if ns is not None else None
+
+
+def _event_toxicity(instrument_key: str, state: SymbolState) -> float:
+    """Toxicity for an event row: the symbol's own reading, else the futures
+    mirror's (spot indices have no volume feed, but their flow context lives in
+    the volume-bearing FUT leg — same mirror the english verdict uses)."""
+    if state.flow_toxicity >= 0:
+        return state.flow_toxicity
+    fut_display = SPOT_TO_FUT_DISPLAY_MIRROR.get(get_display_name(instrument_key))
+    if fut_display:
+        for k, st in symbol_states.items():
+            if get_display_name(k) == fut_display:
+                return st.flow_toxicity
+    return -1.0
+
+
 def update_signal_engine(
     instrument_key: str, state: SymbolState, now_ist: datetime | None = None
 ) -> None:
@@ -1586,6 +1627,9 @@ def update_signal_engine(
                     event_type=("EXIT" if prev_sig_state == 2 else "ABORT"),
                     side=prev_alert_side, z_score=state.z_score, ltp=state.ltp,
                     regime=state.regime, setup_label="", conviction=0,
+                    tod_phase=session_phase(now_ist),
+                    toxicity=_event_toxicity(instrument_key, state),
+                    gex=_event_gex(),
                 )
             except Exception:
                 pass
@@ -1698,11 +1742,35 @@ def update_signal_engine(
         else:
             state.action_signal = SIGNAL_TREND_STAND_DOWN
             state.action_style = "magenta"
-        
+
         state.sig_state = 0
         state.alert_side = 0
         state.peak_z = 0.0
         reset_thesis_state(state)
+        # Shadow event: an active ALERT killed by the trend gate. Without this
+        # row the trend gate — the engine's single biggest suppressor — is
+        # invisible to calibrate.py's counterfactual grading (the early return
+        # below skips the transition-emission block at the end of this
+        # function). Graded separately from REGIME_BLOCK aborts: entry here is
+        # the kill-time ltp, not a would-be confirm price.
+        if prev_sig_state == 1:
+            _tk = ("ER+HURST" if (er_trending and hurst_trending)
+                   else ("ER" if er_trending else "HURST"))
+            try:
+                append_event_row(
+                    timestamp=state.last_tick_ts or time.time(),
+                    symbol=get_display_name(instrument_key),
+                    event_type="ABORT", side=prev_alert_side,
+                    z_score=state.z_score, ltp=state.ltp,
+                    regime=state.regime,
+                    setup_label=f"TREND_KILL:{_tk}",
+                    conviction=0,
+                    tod_phase=session_phase(now_ist),
+                    toxicity=_event_toxicity(instrument_key, state),
+                    gex=_event_gex(),
+                )
+            except Exception:
+                pass
         state.prev_z = z_score
         return
 
@@ -1977,9 +2045,13 @@ def update_signal_engine(
                 regime=state.regime, setup_label=state.setup_label or "",
                 conviction=state.conviction_score,
                 conv_factors=(state.conviction_factors if evt == "CONFIRM" else ""),
+                tod_phase=session_phase(now_ist),
+                toxicity=_event_toxicity(instrument_key, state),
+                gex=_event_gex(),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            # Ground-truth training data — never fail silently.
+            console.log(f"[red]events.csv write failed ({evt}): {exc}[/red]")
 
     state.prev_z = z_score
 
@@ -1995,6 +2067,7 @@ from orderflow.aggressor import (
     _bucket_gap,
     classify_and_accumulate_aggressor,
     detect_flow_divergences,
+    update_flow_toxicity,
 )
 
 
@@ -2056,6 +2129,8 @@ def build_log_row(instrument_key: str, state: SymbolState, timestamp: float) -> 
         f"{min_buy}",
         f"{min_sell}",
         state.divergence_label,
+        f"{state.ltt}",
+        f"{state.ltq}",
     )
 
 
@@ -2079,14 +2154,21 @@ def update_pcr_snapshot(instrument_key: str, oi: float | None, timestamp: float)
 
 
 def update_option_greeks(
-    instrument_key: str, iv: float, gamma: float,
+    instrument_key: str, iv: float, gamma: float, delta: float,
     tbq: float, tsq: float, timestamp: float,
 ) -> None:
-    """Store IV/gamma history for the strike and update TBQ/TSQ."""
+    """Store IV/gamma/delta history for the strike and update TBQ/TSQ."""
     if instrument_key not in PCR_KEY_STRIKE:
         return
     strike = PCR_KEY_STRIKE[instrument_key]
     side = PCR_KEY_SIDE.get(instrument_key, "")
+
+    # B4: latest per-side delta (charm proxy + delta-targeted strike work)
+    if delta != 0.0:
+        if side == "CE":
+            pcr_state.delta_by_strike_ce[strike] = delta
+        elif side == "PE":
+            pcr_state.delta_by_strike_pe[strike] = delta
 
     if strike not in pcr_state.iv_history:
         pcr_state.iv_history[strike] = deque(maxlen=GAMMA_FLUSH_HISTORY_MAXLEN)
@@ -2120,6 +2202,8 @@ def record_tick(
     oi: float | None = None,
     book: tuple[float, float] | None = None,
     top_of_book: tuple[float | None, float | None] | None = None,
+    ltt: int = 0,
+    ltq: int = 0,
 ) -> None:
     state = symbol_states[instrument_key]
     if tick_ist is None:
@@ -2128,6 +2212,11 @@ def record_tick(
     ensure_session_rollover(state, tick_ist)
     state.ltp = ltp
     state.last_tick_ts = timestamp
+    # B2: exchange last-trade time (epoch ms) + quantity, logged beside the
+    # arrival timestamp so feed latency / clock skew is measurable offline.
+    # Zero when the source path doesn't carry them (replay, mock, backtest).
+    state.ltt = ltt
+    state.ltq = ltq
     if oi is not None and oi > 0:
         state.oi = oi
     if book is not None:
@@ -2177,6 +2266,7 @@ def record_tick(
         if top_of_book is not None:
             bid, ask = top_of_book
         classify_and_accumulate_aggressor(state, ltp, vtt, bid, ask, tick_ist)
+        update_flow_toxicity(state, timestamp)
     # First tick of the day: seed prior_close from the pre-open prefetch, then capture gap
     if state.session_open is None and ltp > 0:
         if state.prior_close == 0.0:
@@ -2228,6 +2318,11 @@ def record_tick(
         flush_active, flush_side = check_gamma_flush(timestamp)
         state.gamma_flush_active = flush_active
         state.gamma_flush_side = flush_side
+        # P4 shadow: expiry settlement anchor + pin tracker. Hooked HERE (not
+        # in update_signal_engine) because the 15:00–15:30 expiry blackout
+        # short-circuits the signal path during exactly the window this
+        # observes. No-op on non-expiry sessions; throttles internally.
+        update_expiry_anchor(state, timestamp)
 
     # Flow divergences (consume CVD + or_high + ER computed above)
     detect_flow_divergences(state, tick_ist)
@@ -2242,25 +2337,31 @@ def record_tick(
         log_queue.put_nowait(build_log_row(instrument_key, state, timestamp))
 
 
-def extract_feed_metrics(feed: pb.Feed) -> tuple[float, int, float | None] | None:
+def extract_feed_metrics(feed: pb.Feed) -> FeedTick | None:
+    """Decode one Feed into a FeedTick (ltp, vtt, oi, ltt, ltq).
+
+    ltt (exchange last-trade time, epoch ms) and ltq ride along from the LTPC
+    submessage — previously discarded; logged so arrival-vs-exchange clock
+    skew is measurable and trade sizes are available to flow research.
+    """
     oneof_field = feed.WhichOneof("FeedUnion")
 
     if oneof_field == "fullFeed":
         feed_type = feed.fullFeed.WhichOneof("FullFeedUnion")
         if feed_type == "marketFF":
-            market_feed = feed.fullFeed.marketFF
-            return market_feed.ltpc.ltp, market_feed.vtt, float(market_feed.oi)
+            mf = feed.fullFeed.marketFF
+            return FeedTick(mf.ltpc.ltp, mf.vtt, float(mf.oi), int(mf.ltpc.ltt), int(mf.ltpc.ltq))
         if feed_type == "indexFF":
-            index_feed = feed.fullFeed.indexFF
-            return index_feed.ltpc.ltp, 0, None
+            lt = feed.fullFeed.indexFF.ltpc
+            return FeedTick(lt.ltp, 0, None, int(lt.ltt), 0)
         return None
 
     if oneof_field == "ltpc":
-        return feed.ltpc.ltp, 0, None
+        return FeedTick(feed.ltpc.ltp, 0, None, int(feed.ltpc.ltt), int(feed.ltpc.ltq))
 
     if oneof_field == "firstLevelWithGreeks":
-        level_feed = feed.firstLevelWithGreeks
-        return level_feed.ltpc.ltp, level_feed.vtt, float(level_feed.oi)
+        lf = feed.firstLevelWithGreeks
+        return FeedTick(lf.ltpc.ltp, lf.vtt, float(lf.oi), int(lf.ltpc.ltt), int(lf.ltpc.ltq))
 
     return None
 
@@ -2305,9 +2406,11 @@ def extract_top_of_book(feed: "pb.Feed") -> tuple[float | None, float | None]:
         return None, None
 
 
-def extract_option_greeks(feed: pb.Feed) -> tuple[float, float, float, float] | None:
-    """Extract (iv, gamma, tbq, tsq) from a fullFeed.marketFF message.
-    Returns None for non-marketFF feeds or if data is absent."""
+def extract_option_greeks(feed: pb.Feed) -> tuple[float, float, float, float, float] | None:
+    """Extract (iv, gamma, delta, tbq, tsq) from a fullFeed.marketFF message.
+    Returns None for non-marketFF feeds or if data is absent. Delta (B4) was
+    previously discarded — needed for the charm proxy and delta-targeted
+    strike selection; signed by the feed (calls +, puts −)."""
     oneof_field = feed.WhichOneof("FeedUnion")
     if oneof_field != "fullFeed":
         return None
@@ -2317,9 +2420,10 @@ def extract_option_greeks(feed: pb.Feed) -> tuple[float, float, float, float] | 
     mf = feed.fullFeed.marketFF
     iv = mf.iv
     gamma = mf.optionGreeks.gamma if mf.HasField("optionGreeks") else 0.0
+    delta = mf.optionGreeks.delta if mf.HasField("optionGreeks") else 0.0
     if iv == 0.0 and gamma == 0.0:
         return None
-    return iv, gamma, mf.tbq, mf.tsq
+    return iv, gamma, delta, mf.tbq, mf.tsq
 
 
 async def process_message_receiver(raw, tick_queue, token_to_instrument):
@@ -2335,11 +2439,11 @@ async def process_message_receiver(raw, tick_queue, token_to_instrument):
         if metrics is None:
             continue
 
-        ltp, vtt, oi = metrics
+        ft = metrics
         inst_key = token_to_instrument.get(feed_key, feed_key)
 
         # 1. Update PCR options data (fast, no math)
-        update_pcr_snapshot(inst_key, oi, timestamp)
+        update_pcr_snapshot(inst_key, ft.oi, timestamp)
 
         # 2. V3.0: Extract and store option greeks (ATM strikes only)
         if inst_key in PCR_KEY_SIDE:
@@ -2348,15 +2452,15 @@ async def process_message_receiver(raw, tick_queue, token_to_instrument):
                 update_option_greeks(inst_key, *greeks, timestamp)
 
             # V4.0: Track per-strike option LTP + rolling OI history for RoC
-            update_option_ltp(inst_key, ltp)
-            if oi is not None:
-                update_oi_roc_tracking(inst_key, oi, timestamp)
+            update_option_ltp(inst_key, ft.ltp)
+            if ft.oi is not None:
+                update_oi_roc_tracking(inst_key, ft.oi, timestamp)
 
         # 3. Only push CORE assets to the heavy math queue
         if inst_key in symbol_states:
             book = extract_book_pressure(feed)
             top_of_book = extract_top_of_book(feed)
-            tick_queue.put_nowait((inst_key, ltp, vtt, oi, book, top_of_book, timestamp))
+            tick_queue.put_nowait((inst_key, ft, book, top_of_book, timestamp))
 
 
 async def compute_worker(tick_queue, log_queue):
@@ -2368,9 +2472,10 @@ async def compute_worker(tick_queue, log_queue):
             while tick_queue.qsize() > 10:
                 tick_queue.get_nowait()
 
-        inst_key, ltp, vtt, oi, book, top_of_book, ts = await tick_queue.get()
+        inst_key, ft, book, top_of_book, ts = await tick_queue.get()
         if inst_key in symbol_states:
-            record_tick(inst_key, ltp, vtt, ts, log_queue, oi=oi, book=book, top_of_book=top_of_book)
+            record_tick(inst_key, ft.ltp, ft.vtt, ts, log_queue, oi=ft.oi,
+                        book=book, top_of_book=top_of_book, ltt=ft.ltt, ltq=ft.ltq)
 
             # V5.0: Fire Sonar query on significant signal (non-blocking)
             if _sonar_engine is not None:
@@ -3163,9 +3268,11 @@ async def ws_task(log_queue: asyncio.Queue, tick_queue: asyncio.Queue) -> None:
     radar_task = None
     while True:
         try:
+            # Full certificate verification — this socket carries the bearer
+            # token AND every tick the engine acts on; an unverified peer could
+            # both steal the token and poison the data. If a local proxy ever
+            # breaks verification, pin its CA here — never disable checking.
             ssl_ctx = ssl.create_default_context()
-            ssl_ctx.check_hostname = False
-            ssl_ctx.verify_mode = ssl.CERT_NONE
 
             async with websockets.connect(
                 WS_URL,
@@ -3574,6 +3681,36 @@ async def expiry_auto_roll() -> None:
         await asyncio.sleep(60)
 
 
+def boot_positioning_anchor() -> tuple[bool, str]:
+    """Phase A dealer-positioning anchor (shadow): upsert today's fetched FII
+    snapshot into the participant history table (the engine maintains its own
+    daily series — no separate timer), then load the T-1 anchor into the shared
+    positioning_state singleton. Shared by the Rich dashboard boot
+    (run_live_mode) and the headless web-server boot (web_server.py) — the
+    production service runs the latter. Never raises; returns (ok, status)."""
+    try:
+        from positioning.anchor import anchor_for, upsert_row
+        from core.state import positioning_state
+        if _fii_snapshot is not None and _fii_snapshot.client is not None:
+            upsert_row(_fii_snapshot)
+        _anchor = anchor_for(datetime.now(IST).date())
+        if _anchor is None:
+            return False, ("Dealer anchor: no participant history yet "
+                           "(run positioning/backfill.py)")
+        positioning_state.loaded = True
+        positioning_state.as_of = _anchor.as_of.isoformat()
+        positioning_state.dealer_short_gamma_score = _anchor.dealer_short_gamma_score
+        positioning_state.client_net_opt = _anchor.client_net_opt
+        positioning_state.fii_fut_net = _anchor.fii_fut_net
+        positioning_state.dii_fut_net = _anchor.dii_fut_net
+        _side = "SHORT" if _anchor.dealer_short_gamma_score > 0 else "LONG"
+        return True, (f"Dealer anchor ({_anchor.as_of}): gamma-{_side} "
+                      f"score {_anchor.dealer_short_gamma_score:+.4f}, "
+                      f"FII fut net {_anchor.fii_fut_net:+,}")
+    except Exception as exc:
+        return False, f"Dealer anchor load failed (non-critical): {exc}"
+
+
 async def run_live_mode() -> None:
     global _fii_snapshot, _sonar_engine
 
@@ -3594,6 +3731,13 @@ async def run_live_mode() -> None:
             console.print(f"[green][OK] FII/DII loaded: {_fii_snapshot.format_summary()}[/green]")
         except Exception as exc:
             console.print(f"[yellow]FII/DII fetch failed (non-critical): {exc}[/yellow]")
+
+    # --- Phase A: dealer-positioning anchor (shadow) ---
+    _anchor_ok, _anchor_msg = boot_positioning_anchor()
+    if _anchor_ok:
+        console.print(f"[green][OK] {_anchor_msg}[/green]")
+    else:
+        console.print(f"[yellow]{_anchor_msg}[/yellow]")
 
     # --- V5.0: Initialize Sonar news engine ---
     if SONAR_ENABLED and _SONAR_AVAILABLE:

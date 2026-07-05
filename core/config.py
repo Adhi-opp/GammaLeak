@@ -79,6 +79,10 @@ LOG_COLUMNS = REQUIRED_LOG_COLUMNS + (
     "er", "hurst", "regime", "volume", "oi",
     "book_imb", "gap_pct", "gap_bucket", "verdict",
     "cvd", "min_buy", "min_sell", "divergence",
+    # B2 (2026-07): exchange last-trade time (epoch ms) + last trade qty —
+    # appended LAST so positional consumers (calibrate's ltp=row[2]) survive.
+    # Boot-time schema rotation archives pre-bump files automatically.
+    "ltt", "ltq",
 )
 EVENT_LOG_COLUMNS = (
     "timestamp", "timestamp_ist", "symbol", "event_type", "side",
@@ -86,6 +90,22 @@ EVENT_LOG_COLUMNS = (
     # Phase 2: comma-joined active conviction factors (e.g. "EXH,DIV") at the
     # CONFIRM. Lets calibrate.py measure each factor's MFE lift and re-weight.
     "conv_factors",
+    # Shadow conditioning features (observational — nothing gates on these yet;
+    # calibrate.py measures their conditional hit rates nightly):
+    #   tod_phase — session phase at the event (OPEN/MORNING/LUNCH/EUROPE/CLOSE)
+    #   toxicity  — trailing |ΔCVD|/ΔVolume flow-toxicity ratio ("" when the
+    #               symbol has no volume feed and no futures mirror)
+    #   gex       — NIFTY net dealer gamma over the subscribed ATM window at
+    #               event time (SPX sign convention, see orderflow/gex.py;
+    #               "" until the option chain has delivered live greeks)
+    "tod_phase", "toxicity", "gex",
+)
+# Per-strike dealer-gamma snapshot written every GEX_SNAPSHOT_SECS to
+# logs/YYYY-MM-DD_gex.csv. Long format (one row per strike per snapshot) so
+# the sign model can be re-derived offline without re-collecting anything.
+GEX_LOG_COLUMNS = (
+    "timestamp", "timestamp_ist", "spot", "strike",
+    "gamma", "ce_oi", "pe_oi", "ce_delta", "pe_delta", "net_gex_1pct",
 )
 # Per-sample snapshot of the OI Flow Anchored Velocity Chart's underlying
 # state. Persisting these lets us retroactively verify "did spot bounce off
@@ -254,7 +274,14 @@ SCHEDULED_EVENTS: list[tuple[str, str]] = [
     ("2026-04-23T14:00:00+05:30", "OPEC+ Meeting"),
 ]
 EVENT_FILE_PATH = "data/events.txt"
-EXPIRY_BLACKOUT_WEEKDAY = 3          # Thursday (Mon=0)
+# FALLBACK ONLY — the engine keys expiry logic to the RESOLVED NIFTY expiry
+# date from the instrument master (analytics.vol_surface.get_expiry_date).
+# This weekday constant is used only when no expiry has been resolved yet
+# (preflight / mock mode). Verified against the cached master 2026-07-03:
+# every NIFTY option expiry is a TUESDAY (Mon=0 → 1). The old value 3
+# (Thursday) predated the Sept-2025 exchange expiry reshuffle and mislabeled
+# every EXPIRY PIN in logs through 2026-06 (all fired on Thursdays).
+EXPIRY_BLACKOUT_WEEKDAY = 1          # Tuesday (Mon=0) — fallback only
 EXPIRY_BLACKOUT_START = (15, 0)
 EXPIRY_BLACKOUT_END = (15, 30)
 
@@ -516,7 +543,9 @@ HAND_CONVICTION_WEIGHTS: dict[str, int] = {
     "DIV":   1,   # CVD divergence aligns with the fade — measured +12 lift (n=46)
     "CHOP":  1,   # ER & Hurst both non-trending (fade-friendly) — weak +3, kept
     "OIF":   1,   # OI flow aligns with fade side — not yet instrumented, kept neutral
-    "DRIFT": 1,   # 5-min drift opposes the stretch — suspected weak; instrumented now
+    "DRIFT": 0,   # measured -37pp lift (7% hit present vs 44% absent, n=14/122,
+                  # 16-session grade 2026-07-03) — anti-predictive; zeroed until a
+                  # future calibration run with n>=15 present says otherwise
     "OFI":   0,   # Phase-1 OFI absorption aligns — instrumented, off until validated
     "VOL":   0,   # Phase-5 low-IV + non-FEAR skew — instrumented, off until calibrated
 }
@@ -540,6 +569,67 @@ def _merge_conviction_weights() -> dict[str, int]:
 
 
 CONVICTION_FACTOR_WEIGHTS: dict[str, int] = _merge_conviction_weights()
+
+
+# --------------------------- SHADOW CONDITIONING (P1 toxicity / P3 time-of-day) ---------------------------
+#
+# Observational features logged on every sig_state event so the nightly grader
+# can measure conditional hit rates BEFORE anything gates on them (shadow →
+# paper → live promotion path). Definitions must stay in lockstep with the
+# retroactive study scripts so live and research measurements are comparable.
+
+# Flow toxicity: TOX(t) = |CVD(t) − CVD(t−W)| / (Vol(t) − Vol(t−W)).
+# A cheap VPIN-style proxy on the existing aggressor stream — high values mean
+# one-sided (informed / parent-order) flow, the tape where fades die.
+TOX_WINDOW_SECS = 1200        # 20-min trailing window
+TOX_SNAPSHOT_SECS = 30        # (ts, cvd, cum_volume) snapshot cadence
+
+# Net dealer gamma exposure (P2 research track). Snapshot cadence + staleness
+# bound for a strike's last-seen gamma. Window-local by construction: only the
+# subscribed ATM±window strikes contribute (wings excluded — noted limitation).
+GEX_SNAPSHOT_SECS = 60.0      # one per-strike snapshot row set per minute
+GEX_STALE_SECS = 120.0        # ignore a strike's gamma older than this
+GEX_MIN_STRIKES = 3           # need at least this many live strikes to publish
+
+# Expiry settlement-anchor tracker (P4 research track, shadow). On the
+# resolved NIFTY expiry day, from EXPIRY_TRACK_START the tracker samples the
+# gamma-mass pin strike; from EXPIRY_SETTLE_START it also maintains a running
+# estimate of the exchange settlement price (the last-half-hour average of the
+# index) and samples faster — the anchor progressively locks in, which is the
+# whole inefficiency. Rows land in logs/YYYY-MM-DD_expiry.csv.
+EXPIRY_TRACK_START = (13, 0)          # pin observation begins (IST)
+EXPIRY_SETTLE_START = (15, 0)         # settlement averaging window opens
+EXPIRY_SETTLE_END = (15, 30)          # market close / window ends
+EXPIRY_SAMPLE_SECS_PRE = 60.0         # snapshot cadence 13:00–15:00
+EXPIRY_SAMPLE_SECS_SETTLE = 15.0      # snapshot cadence inside the window
+EXPIRY_LOG_COLUMNS = (
+    "timestamp", "timestamp_ist", "spot",
+    "settle_est",       # running mean of spot ticks since 15:00 ("" before)
+    "settle_n",         # ticks in the running mean (0 before window)
+    "pin_strike",       # argmax gamma-mass strike (see pin_src)
+    "pin_src",          # GEX (gamma x OI) | OI (OI-only fallback, no live greeks)
+    "pin_mass",         # gamma-mass (or OI) at the pin strike
+    "pin_dist",         # spot - pin_strike (points)
+    "mins_to_close",    # minutes until EXPIRY_SETTLE_END
+)
+
+# Session phases for time-of-day conditioning (IST, half-open [start, end)).
+SESSION_PHASES: tuple[tuple[tuple[int, int], tuple[int, int], str], ...] = (
+    ((9, 15), (10, 0), "OPEN"),      # retail-heavy price discovery
+    ((10, 0), (11, 30), "MORNING"),  # institutional main session
+    ((11, 30), (13, 0), "LUNCH"),    # volume trough, algo-dominated
+    ((13, 0), (14, 0), "EUROPE"),    # European open overlap
+    ((14, 0), (15, 30), "CLOSE"),    # MTM / positioning flows
+)
+
+
+def session_phase(now_ist) -> str:
+    """Phase label for a tz-aware IST datetime; '' outside session hours."""
+    cur = now_ist.hour * 60 + now_ist.minute
+    for (sh, sm), (eh, em), label in SESSION_PHASES:
+        if sh * 60 + sm <= cur < eh * 60 + em:
+            return label
+    return ""
 
 
 # --------------------------- OI FLOW TIMELINE ---------------------------

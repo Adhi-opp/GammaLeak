@@ -30,6 +30,7 @@ from core.config import (
 )
 from core.models import SymbolState
 from core.state import symbol_states, pcr_state
+from orderflow.gex import update_gex
 from orderflow.oi_flow import classify_oi_flow, record_oi_flow_sample
 
 
@@ -72,6 +73,10 @@ def classify_dynamic_regime(state: SymbolState, timestamp: float) -> str:
     # V5.1: OI Delta flow classification (runs on every regime tick)
     classify_oi_flow(nifty_state)
     record_oi_flow_sample(nifty_state, timestamp)
+
+    # P2 shadow: net dealer gamma refresh + per-strike snapshot (60s throttle
+    # inside — same fan-out point as the OI flow updaters above)
+    update_gex(nifty_state, timestamp)
 
     if ce_roc <= OI_ROC_CAPITULATION_PCT or pe_roc <= OI_ROC_CAPITULATION_PCT:
         return REGIME_GAMMA_SQUEEZE

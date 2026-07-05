@@ -112,6 +112,37 @@ def classify_and_accumulate_aggressor(
     state._prev_vtt_for_aggressor = vtt
 
 
+def update_flow_toxicity(state: "SymbolState", now: float) -> None:
+    """Shadow feature (P1): trailing flow-toxicity ratio |ΔCVD| / ΔVolume.
+
+    VPIN-style proxy on the aggressor stream — near 1.0 the tape is one-sided
+    (parent order / informed flow working), near 0.0 the flow is balanced.
+    Snapshots (ts, cvd, cum_volume) every TOX_SNAPSHOT_SECS; the ratio spans
+    the oldest snapshot inside TOX_WINDOW_SECS. Observational only — logged on
+    sig_state events for the nightly grader; nothing gates on it yet.
+
+    Reads: cvd, cum_volume, _flow_snapshots. Writes: flow_toxicity, _flow_snapshots.
+    Definition must stay identical to the retroactive study (tox_study.py).
+    """
+    from core.config import TOX_WINDOW_SECS, TOX_SNAPSHOT_SECS
+
+    snaps = state._flow_snapshots
+    if not snaps or (now - snaps[-1][0]) >= TOX_SNAPSHOT_SECS:
+        snaps.append((now, state.cvd, state.cum_volume))
+
+    cutoff = now - TOX_WINDOW_SECS
+    while len(snaps) > 1 and snaps[1][0] <= cutoff:
+        snaps.popleft()
+
+    ts0, cvd0, vol0 = snaps[0]
+    d_vol = state.cum_volume - vol0
+    # Need a real window span and real traded volume for the ratio to mean anything
+    if now - ts0 < TOX_WINDOW_SECS * 0.25 or d_vol <= 0:
+        state.flow_toxicity = -1.0
+        return
+    state.flow_toxicity = min(1.0, abs(state.cvd - cvd0) / d_vol)
+
+
 def detect_flow_divergences(state: "SymbolState", tick_ist: datetime) -> None:
     """Update state.divergence_label based on CVD-vs-price structural relationships.
 

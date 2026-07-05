@@ -26,6 +26,7 @@ from core.models import (
     PCRState,
     IndexDriverState,
     OILevelsState,
+    PositioningState,
 )
 
 
@@ -59,6 +60,10 @@ index_driver_state = IndexDriverState()
 
 # Max-pain + gamma walls per symbol. Refreshed by refresh_oi_levels on its own cadence.
 oi_levels_state = OILevelsState()
+
+# Daily dealer/participant positioning anchor (T-1 file, loaded at boot by
+# run_live_mode; consumed by Phase-C DealerState and future serializers).
+positioning_state = PositioningState()
 
 # Bounded ring buffer powering the anchored velocity chart on the dashboard.
 # Capacity = window / sample, so 30 min @ 5s = 360 rows max.

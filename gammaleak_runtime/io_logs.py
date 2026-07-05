@@ -22,8 +22,9 @@ from pathlib import Path
 # `__main__` and `GammaLeak`, so re-importing it re-runs top-level
 # code mid-load).
 from core.config import (
-    EVENT_LOG_COLUMNS, IST, LOG_BATCH_SIZE, LOG_COLUMNS, LOG_DIR,
-    LOG_FLUSH_INTERVAL_SECS, OI_STATE_LOG_COLUMNS,
+    EVENT_LOG_COLUMNS, EXPIRY_LOG_COLUMNS, GEX_LOG_COLUMNS, IST,
+    LOG_BATCH_SIZE, LOG_COLUMNS, LOG_DIR, LOG_FLUSH_INTERVAL_SECS,
+    OI_STATE_LOG_COLUMNS,
 )
 from core.state import console
 
@@ -61,12 +62,17 @@ def append_event_row(
     timestamp: float, symbol: str, event_type: str, side: int,
     z_score: float, ltp: float, regime: str = "", setup_label: str = "",
     conviction: int = 0, conv_factors: str = "",
+    tod_phase: str = "", toxicity: float = -1.0, gex: float | None = None,
 ) -> None:
     """Append one sig_state transition to logs/YYYY-MM-DD_events.csv.
 
     Synchronous on purpose: transitions are low-rate (a handful per symbol per
     day) so the disk_writer_task batching machinery is overkill. Header is
     written lazily on first call of the day.
+
+    tod_phase / toxicity / gex are shadow conditioning features (see
+    EVENT_LOG_COLUMNS in core/config.py) — toxicity < 0 and gex None mean
+    unavailable and log as "".
     """
     path = get_events_log_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,6 +82,8 @@ def append_event_row(
         f"{timestamp:.3f}", ts_ist, symbol, event_type, str(side),
         f"{z_score:.4f}", f"{ltp:.4f}", regime, setup_label, str(conviction),
         conv_factors,
+        tod_phase, (f"{toxicity:.4f}" if toxicity >= 0 else ""),
+        (f"{gex:.1f}" if gex is not None else ""),
     )
     with path.open("a", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
@@ -115,6 +123,78 @@ def append_oi_state_row(
         writer = csv.writer(handle)
         if write_header:
             writer.writerow(OI_STATE_LOG_COLUMNS)
+        writer.writerow(row)
+
+
+def get_gex_log_path(trading_day: date | None = None) -> Path:
+    active_day = trading_day or datetime.now(IST).date()
+    return LOG_DIR / f"{active_day.isoformat()}_gex.csv"
+
+
+def append_gex_snapshot(
+    timestamp: float, spot: float,
+    rows: list[tuple[int, float, float, float, float, float]],  # (strike, gamma, ce_oi, pe_oi, ce_delta, pe_delta)
+    net_gex_1pct: float,
+) -> None:
+    """Append one per-strike GEX snapshot block to logs/YYYY-MM-DD_gex.csv.
+
+    Long format — one row per strike, aggregate repeated on each row for
+    self-contained parsing. Cadence is GEX_SNAPSHOT_SECS (60s) × ~10-20
+    strikes ≈ a few thousand rows per session; small. The per-strike detail
+    is the point: it lets the dealer-side sign model be re-derived offline
+    without another collection cycle.
+    """
+    path = get_gex_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists()
+    ts_ist = datetime.fromtimestamp(timestamp, IST).strftime("%Y-%m-%d %H:%M:%S")
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        if write_header:
+            writer.writerow(GEX_LOG_COLUMNS)
+        for strike, gamma, ce_oi, pe_oi, ce_delta, pe_delta in rows:
+            writer.writerow((
+                f"{timestamp:.3f}", ts_ist, f"{spot:.2f}", str(strike),
+                f"{gamma:.6f}", f"{ce_oi:.0f}", f"{pe_oi:.0f}",
+                f"{ce_delta:.4f}", f"{pe_delta:.4f}",
+                f"{net_gex_1pct:.1f}",
+            ))
+
+
+def get_expiry_log_path(trading_day: date | None = None) -> Path:
+    active_day = trading_day or datetime.now(IST).date()
+    return LOG_DIR / f"{active_day.isoformat()}_expiry.csv"
+
+
+def append_expiry_row(
+    timestamp: float, spot: float,
+    settle_est: float | None, settle_n: int,
+    pin_strike: int, pin_src: str, pin_mass: float,
+    pin_dist: float | None, mins_to_close: float,
+) -> None:
+    """Append one expiry-anchor snapshot to logs/YYYY-MM-DD_expiry.csv.
+
+    Written only on the resolved expiry day, 13:00→15:30 (see
+    orderflow/expiry.py) — ~150 rows per expiry. settle_est/pin_dist are ""
+    outside their valid ranges rather than 0, so parsers can't mistake
+    'not yet' for 'at the strike'.
+    """
+    path = get_expiry_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists()
+    ts_ist = datetime.fromtimestamp(timestamp, IST).strftime("%Y-%m-%d %H:%M:%S")
+    row = (
+        f"{timestamp:.3f}", ts_ist, f"{spot:.2f}",
+        (f"{settle_est:.2f}" if settle_est is not None else ""),
+        str(settle_n),
+        str(pin_strike), pin_src, f"{pin_mass:.4f}",
+        (f"{pin_dist:+.2f}" if pin_dist is not None else ""),
+        f"{mins_to_close:.1f}",
+    )
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        if write_header:
+            writer.writerow(EXPIRY_LOG_COLUMNS)
         writer.writerow(row)
 
 
