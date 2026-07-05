@@ -106,6 +106,13 @@ EVENT_LOG_COLUMNS = (
 GEX_LOG_COLUMNS = (
     "timestamp", "timestamp_ist", "spot", "strike",
     "gamma", "ce_oi", "pe_oi", "ce_delta", "pe_delta", "net_gex_1pct",
+    # Per-strike premium (last option LTP each side; "" if not yet traded).
+    # ΔOI alone cannot attribute flow — every contract has a buyer AND a
+    # writer. ΔOI × Δpremium disambiguates: OI↑+prem↓ = writers in,
+    # OI↑+prem↑ = buyers in, OI↓+prem↑ = writer buy-back (squeeze fuel),
+    # OI↓+prem↓ = long unwind. Offline classifier consumes these snapshots;
+    # readers must be column-count-aware (rows before 2026-07-06 are 10-col).
+    "ce_ltp", "pe_ltp",
 )
 # Per-sample snapshot of the OI Flow Anchored Velocity Chart's underlying
 # state. Persisting these lets us retroactively verify "did spot bounce off

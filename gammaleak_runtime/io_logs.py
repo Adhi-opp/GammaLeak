@@ -134,7 +134,7 @@ def get_gex_log_path(trading_day: date | None = None) -> Path:
 
 def append_gex_snapshot(
     timestamp: float, spot: float,
-    rows: list[tuple[int, float, float, float, float, float]],  # (strike, gamma, ce_oi, pe_oi, ce_delta, pe_delta)
+    rows: list[tuple[int, float, float, float, float, float, float, float]],  # (strike, gamma, ce_oi, pe_oi, ce_delta, pe_delta, ce_ltp, pe_ltp)
     net_gex_1pct: float,
 ) -> None:
     """Append one per-strike GEX snapshot block to logs/YYYY-MM-DD_gex.csv.
@@ -153,12 +153,14 @@ def append_gex_snapshot(
         writer = csv.writer(handle)
         if write_header:
             writer.writerow(GEX_LOG_COLUMNS)
-        for strike, gamma, ce_oi, pe_oi, ce_delta, pe_delta in rows:
+        for strike, gamma, ce_oi, pe_oi, ce_delta, pe_delta, ce_ltp, pe_ltp in rows:
             writer.writerow((
                 f"{timestamp:.3f}", ts_ist, f"{spot:.2f}", str(strike),
                 f"{gamma:.6f}", f"{ce_oi:.0f}", f"{pe_oi:.0f}",
                 f"{ce_delta:.4f}", f"{pe_delta:.4f}",
                 f"{net_gex_1pct:.1f}",
+                f"{ce_ltp:.2f}" if ce_ltp > 0 else "",
+                f"{pe_ltp:.2f}" if pe_ltp > 0 else "",
             ))
 
 

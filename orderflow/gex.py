@@ -54,16 +54,18 @@ def _latest_gamma(history: deque | None, now: float) -> float | None:
     return None
 
 
-def compute_gex(spot: float, now: float) -> tuple[float, float, float, list[tuple[int, float, float, float, float, float]]] | None:
+def compute_gex(spot: float, now: float) -> tuple[float, float, float, list[tuple[int, float, float, float, float, float, float, float]]] | None:
     """Return (gex_ce, gex_pe, net_gex_1pct, per_strike_rows) or None if the
     chain hasn't delivered enough live greeks (< GEX_MIN_STRIKES strikes).
-    Row = (strike, gamma, ce_oi, pe_oi, ce_delta, pe_delta) — deltas ride
-    along for the charm proxy (B4); 0.0 when the feed hasn't priced them."""
+    Row = (strike, gamma, ce_oi, pe_oi, ce_delta, pe_delta, ce_ltp, pe_ltp) —
+    deltas ride along for the charm proxy (B4), premiums for offline ΔOI×Δprem
+    flow attribution (writer-in vs buyer-in); 0.0 when the feed hasn't priced
+    them."""
     if spot <= 0:
         return None
     gex_ce = 0.0
     gex_pe = 0.0
-    rows: list[tuple[int, float, float, float, float, float]] = []
+    rows: list[tuple[int, float, float, float, float, float, float, float]] = []
     for strike in sorted(set(pcr_state.ce_oi) | set(pcr_state.pe_oi)):
         g = _latest_gamma(pcr_state.gamma_history.get(strike), now)
         if g is None:
@@ -76,7 +78,9 @@ def compute_gex(spot: float, now: float) -> tuple[float, float, float, list[tupl
         gex_pe += g * pe
         rows.append((strike, g, ce, pe,
                      float(pcr_state.delta_by_strike_ce.get(strike, 0.0)),
-                     float(pcr_state.delta_by_strike_pe.get(strike, 0.0))))
+                     float(pcr_state.delta_by_strike_pe.get(strike, 0.0)),
+                     float(pcr_state.ce_ltp_by_strike.get(strike, 0.0)),
+                     float(pcr_state.pe_ltp_by_strike.get(strike, 0.0))))
     if len(rows) < GEX_MIN_STRIKES:
         return None
     net_1pct = (gex_ce - gex_pe) * spot * spot * 0.01
