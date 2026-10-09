@@ -68,7 +68,7 @@ Shorter 3-bullet version if space gets tight:
 
 **GammaLeak — Live F&O microstructure radar** · Python · WebSockets · FastAPI · pandas · *2026*
 
-- Built and ran a live monitor for Indian index F&O that ingests NIFTY, BANKNIFTY, front-month futures, VIX, USDINR, crude, RELIANCE, HDFCBANK, and NIFTY option-chain state.
+- Built and ran a live monitor for Indian index F&O that ingests NIFTY, BANKNIFTY, front-month futures, VIX, crude, RELIANCE, HDFCBANK, and NIFTY option-chain state.
 - Added F&O-specific primitives: dynamic expiry rollover, ATM strike-window tracking, PCR, ATM straddle box, OI rate-of-change, full-chain max-pain polling, near-ATM walls, and deep OI cluster detection.
 - Detected actionable microstructure states including liquidity sweeps, PE/CE wall failures, gamma flushes, spot-futures basis leads, CVD divergences, and flow-confirmed opening-range breakouts.
 - Mirrored futures-derived order-flow verdicts onto spot-index cards so volume-less spot indices inherit the active futures leg's CVD and flow context.

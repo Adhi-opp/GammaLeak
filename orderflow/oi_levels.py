@@ -10,7 +10,10 @@ so the dashboard's anchored velocity chart can read the latest anchors.
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 from core.config import (
+    IST,
     OI_LEVELS_REFRESH_SECS,
     OI_LEVELS_BAND_PCT,
     OI_LEVELS_WALLS_COUNT,
@@ -18,7 +21,8 @@ from core.config import (
     OI_LEVELS_STALE_SECS,
 )
 from core.models import OILevels, OIWall
-from core.state import oi_levels_state, symbol_states, pcr_state
+from core.state import oi_levels_state, pcr_state
+from orderflow.chain import chain_spot
 
 
 def _compute_max_pain(ce_oi: dict[int, float], pe_oi: dict[int, float]) -> tuple[int, float]:
@@ -95,8 +99,9 @@ def refresh_oi_levels(now: float) -> None:
 
     from GammaLeak import PCR_EXPIRY_CODE  # deferred — see docstring
 
-    nifty_state = symbol_states.get("NSE_INDEX|Nifty 50")
-    spot = float(nifty_state.ltp) if nifty_state else 0.0
+    # Walls and max-pain distance are measured from the chain underlying —
+    # futures-implied while the cash index is frozen for the closing auction.
+    spot, _ = chain_spot(datetime.fromtimestamp(now, IST))
 
     lvl = OILevels(symbol="NIFTY", spot=spot, expiry=PCR_EXPIRY_CODE or "")
 

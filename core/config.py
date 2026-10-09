@@ -9,7 +9,7 @@ after boot is not config, it's state.
 from __future__ import annotations
 
 import json
-from datetime import timedelta, timezone
+from datetime import date, timedelta, timezone
 from pathlib import Path
 
 
@@ -45,6 +45,85 @@ EUROPE_WATCH_HOUR, EUROPE_WATCH_MINUTE = 12, 30
 THESIS_DECAY_SECS = 45 * 60
 
 
+# --------------------------- CLOSING AUCTION SESSION (CAS) ---------------------------
+#
+# SEBI circular 2026-01-16, live 2026-08-03 on NSE + BSE: F&O-eligible stocks
+# stop continuous trading (CTS) at 15:15 and close through a call auction,
+# index and stock F&O trade on to 15:40, and expiring index derivatives settle
+# on the CAS-derived index close. Verified on 42/42 sessions 2026-08-03..10-01
+# (research/study_cas_closing_auction.py): NIFTY / BANKNIFTY / SENSEX hold a
+# flat 15:15 value until the official close prints in the 15:28/15:29 bar,
+# and the feed keeps delivering that frozen value at heartbeat cadence —
+# which collapses rolling σ and drives |Z| to the cap within ~12 minutes.
+# SEBI's 2026-09-12 consultation may move these windows again (CAS 15:31-15:40
+# with F&O to 15:45, or CAS 15:15-15:25 with F&O to 15:30), so every boundary
+# lives here: a timetable change is a config edit, not a code hunt.
+CAS_EFFECTIVE_FROM = date(2026, 8, 3)
+PRE_CAS_CLOSE = (15, 30)            # pre-CAS: cash, index and F&O all closed at 15:30
+CAS_REF_WINDOW_START = (15, 0)      # auction reference price = VWAP of 15:00-15:15 trades
+CAS_CTS_END = (15, 15)              # F&O-stock CTS ends; spot indices stop computing
+CAS_ORDER_ENTRY_START = (15, 20)    # 15:15-15:20 transition: no new orders
+CAS_LIMIT_ONLY_START = (15, 25)     # market orders locked from here
+CAS_RANDOM_CLOSE_START = (15, 28)   # order entry ends at a random time in 15:28-15:30
+CAS_MATCHING_START = (15, 30)
+CAS_MATCHING_END = (15, 35)         # closing prices confirmed by here
+FNO_CLOSE = (15, 40)                # index/stock F&O close (pre-CAS: 15:30)
+
+# Display-name classes for session-end logic (display names, not instrument
+# keys, so the engine and calibrate.py share one rule). Spot indices are
+# computed from constituent trades, so they freeze with CTS; every cash
+# equity this engine tracks is an F&O stock (CAS Category I). Index futures
+# trade to FNO_CLOSE. Anything unlisted (CRUDEOIL on MCX, VIX) keeps its own
+# session and is never cut here.
+INDEX_SPOT_DISPLAYS = frozenset({"NIFTY", "BANKNIFTY", "SENSEX"})
+CAS_EQUITY_DISPLAYS = frozenset({"RELIANCE", "HDFCBANK", "SBIN", "ICICIBANK"})
+INDEX_FUT_DISPLAYS = frozenset({"NIFTY_FUT", "BN_FUT", "SENSEX_FUT"})
+
+
+def cas_active(day: date) -> bool:
+    return day >= CAS_EFFECTIVE_FROM
+
+
+def continuous_session_end(display: str, day: date) -> tuple[int, int] | None:
+    """(hour, minute) at which `display` stops printing continuous-trading
+    prices on `day`, or None for instruments this rule doesn't govern.
+
+    Past this point a spot index is a frozen or auction-computed value and an
+    F&O stock is an auction or post-close print — neither may drive σ/Z or
+    grade an outcome. Pre-CAS days keep the old 15:30 close for every class,
+    which also stops post-close heartbeat ticks from inflating Z (2026-07-05:
+    |Z| hit the cap within 15 min of the close on a flat NIFTY).
+    """
+    if display in INDEX_SPOT_DISPLAYS or display in CAS_EQUITY_DISPLAYS:
+        return CAS_CTS_END if cas_active(day) else PRE_CAS_CLOSE
+    if display in INDEX_FUT_DISPLAYS:
+        return FNO_CLOSE if cas_active(day) else PRE_CAS_CLOSE
+    return None
+
+
+def cas_phase(now_ist) -> str:
+    """Closing-auction sub-phase for a tz-aware IST datetime; '' outside
+    15:00-15:40 or before CAS went live."""
+    if not cas_active(now_ist.date()):
+        return ""
+    cur = (now_ist.hour, now_ist.minute)
+    if cur < CAS_REF_WINDOW_START or cur >= FNO_CLOSE:
+        return ""
+    if cur < CAS_CTS_END:
+        return "REFERENCE"          # the auction's reference VWAP is forming
+    if cur < CAS_ORDER_ENTRY_START:
+        return "TRANSITION"
+    if cur < CAS_LIMIT_ONLY_START:
+        return "ORDER_ENTRY"
+    if cur < CAS_RANDOM_CLOSE_START:
+        return "LIMIT_ONLY"
+    if cur < CAS_MATCHING_START:
+        return "RANDOM_CLOSE"
+    if cur < CAS_MATCHING_END:
+        return "MATCHING"
+    return "POST_CAS_FNO"           # F&O still trading, settlement already known
+
+
 # --------------------------- NETWORK / FEED ---------------------------
 
 WS_URL = "wss://api.upstox.com/v3/feed/market-data-feed"
@@ -52,6 +131,16 @@ WS_TICK_TIMEOUT_SECS = 30  # If no WS message during market hours for this long,
 UPSTOX_HISTORICAL_URL = "https://api.upstox.com/v2/historical-candle/{key}/{interval}/{to_date}/{from_date}"
 UPSTOX_INSTRUMENT_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz"
 LOG_DIR = Path("logs")
+
+# Futures listed on more than one venue: symbol -> (venue preference order,
+# monthly contracts only). Without this get_active_expiry_key takes the
+# nearest expiry anywhere, which resolved CRUDEOIL to NSE_COM's thin twin
+# (MCX names its contract "CRUDE OIL", which the exact name filter used to
+# drop). Venue rank wins over expiry: a liquid preferred-venue contract beats
+# an earlier-dated one elsewhere.
+FUT_VENUE_PREFERENCE: dict[str, tuple[tuple[str, ...], bool]] = {
+    "CRUDEOIL": (("MCX_FO", "NSE_COM"), False),
+}
 
 
 # --------------------------- ROLLING WINDOWS / UI CADENCE ---------------------------
@@ -144,10 +233,11 @@ REGIME_SHIFT_HURST_THRESHOLD = 0.60
 
 # --------------------------- MACRO BIAS ---------------------------
 
-USDINR_FLAT_MOVE = 0.08
+# PCR is the only term since USDINR was removed (2026-10-01). Its feed was
+# dead in every logged session, so the label history is unchanged: any
+# non-zero PCR direction already cleared the ±0.25 thresholds on its own.
 MACRO_BIAS_WEIGHTS = {
-    "USDINR": 0.35,
-    "PCR": 0.65,
+    "PCR": 1.0,
 }
 MACRO_BIAS_FLAT_CHANGE_PCT = 0.05
 PCR_BULLISH_THRESHOLD = 1.10
@@ -168,13 +258,6 @@ SIGNAL_EXHAUSTION_PEAK = 4.0   # |peak_z| above this → exhaustion-grade signal
 
 ER_LOOKBACK_SECS = 4200        # 70-minute lookback (~14 x 5m bars) to suppress chop false positives
 ER_TREND_THRESHOLD = 0.6       # ER above this → trending, suppress mean-reversion
-
-
-# --------------------------- USDINR / RBI INTERVENTION ---------------------------
-
-RBI_INTERVENTION_LEVELS = (92.50, 93.50)   # suspected ceiling/floor
-RBI_PROXIMITY = 0.05                        # 5 paise
-USDINR_Z_BOOST = 0.80                       # multiply Z thresholds near RBI levels
 
 
 # --------------------------- INDIA VIX ---------------------------
@@ -290,7 +373,10 @@ EVENT_FILE_PATH = "data/events.txt"
 # every EXPIRY PIN in logs through 2026-06 (all fired on Thursdays).
 EXPIRY_BLACKOUT_WEEKDAY = 1          # Tuesday (Mon=0) — fallback only
 EXPIRY_BLACKOUT_START = (15, 0)
-EXPIRY_BLACKOUT_END = (15, 30)
+# Through the F&O close: under CAS expiring contracts trade until 15:40, with
+# settlement already fixed by the auction from ~15:30. Pre-CAS nothing traded
+# after 15:30, so the longer window changes nothing for older sessions.
+EXPIRY_BLACKOUT_END = FNO_CLOSE
 
 
 # --------------------------- NAMED SETUP LABELS ---------------------------
@@ -355,7 +441,7 @@ FII_BOOT_ENABLED = True
 SONAR_ENABLED = True
 SONAR_COOLDOWN_SECS = 300
 SONAR_SIGNAL_TRIGGER_Z = 3.0
-SONAR_QUERY_INSTRUMENTS = {"NIFTY", "BANKNIFTY", "CRUDEOIL", "USDINR", "RELIANCE", "HDFCBANK"}
+SONAR_QUERY_INSTRUMENTS = {"NIFTY", "BANKNIFTY", "CRUDEOIL", "RELIANCE", "HDFCBANK"}
 
 
 # --------------------------- PCR BOOTSTRAP ---------------------------
@@ -438,7 +524,6 @@ MIN_FAVORABLE_POINTS_PER_SYMBOL: dict[str, float] = {
     "HDFCBANK":    3.0,
     "SBIN":        3.0,
     "ICICIBANK":   5.0,
-    "USDINR":      0.05,
     "CRUDEOIL":   15.0,
     "VIX":       999.0,
 }
@@ -456,7 +541,6 @@ MFE_ATR_K = 0.5
 # doesn't carry an atr column, so we compute max-min range over the prior
 # N seconds of price ticks at signal time).
 MFE_ATR_PROXY_WINDOW_SECS = 300
-UPSTOX_CURRENCY_UNDERLYINGS = ("USDINR", "EURINR", "GBPINR", "JPYINR")
 
 
 # --------------------------- REGIME GATE ---------------------------
@@ -601,24 +685,68 @@ GEX_MIN_STRIKES = 3           # need at least this many live strikes to publish
 # Expiry settlement-anchor tracker (P4 research track, shadow). On the
 # resolved NIFTY expiry day, from EXPIRY_TRACK_START the tracker samples the
 # gamma-mass pin strike; from EXPIRY_SETTLE_START it also maintains a running
-# estimate of the exchange settlement price (the last-half-hour average of the
-# index) and samples faster — the anchor progressively locks in, which is the
-# whole inefficiency. Rows land in logs/YYYY-MM-DD_expiry.csv.
+# estimate of the exchange settlement price and samples faster. Pre-CAS the
+# settlement was the last-half-hour average of the index (a running mean
+# locks it in progressively — the original inefficiency). Since 2026-08-03 it
+# is the single CAS-derived close, so the estimate becomes the auction's
+# implied close (orderflow/cas.py) and then the printed close itself; the
+# averaging mechanism the P4 hypothesis relied on no longer exists, so pre-
+# and post-CAS expiries must never be pooled. Rows: logs/YYYY-MM-DD_expiry.csv.
 EXPIRY_TRACK_START = (13, 0)          # pin observation begins (IST)
-EXPIRY_SETTLE_START = (15, 0)         # settlement averaging window opens
-EXPIRY_SETTLE_END = (15, 30)          # market close / window ends
+EXPIRY_SETTLE_START = (15, 0)         # settlement window opens
+EXPIRY_SETTLE_END = (15, 30)          # pre-CAS close; CAS days track to FNO_CLOSE
 EXPIRY_SAMPLE_SECS_PRE = 60.0         # snapshot cadence 13:00–15:00
 EXPIRY_SAMPLE_SECS_SETTLE = 15.0      # snapshot cadence inside the window
 EXPIRY_LOG_COLUMNS = (
     "timestamp", "timestamp_ist", "spot",
-    "settle_est",       # running mean of spot ticks since 15:00 ("" before)
-    "settle_n",         # ticks in the running mean (0 before window)
+    "settle_est",       # settlement estimate ("" before the window; see settle_src)
+    "settle_n",         # ticks in the running mean (pre-CAS MEAN source only)
     "pin_strike",       # argmax gamma-mass strike (see pin_src)
     "pin_src",          # GEX (gamma x OI) | OI (OI-only fallback, no live greeks)
     "pin_mass",         # gamma-mass (or OI) at the pin strike
-    "pin_dist",         # spot - pin_strike (points)
-    "mins_to_close",    # minutes until EXPIRY_SETTLE_END
+    "pin_dist",         # reference - pin_strike (points); reference = spot,
+                        # or settle_est inside a CAS day's window (2026-10+)
+    "mins_to_close",    # minutes until the settlement price is fixed
+    # Appended 2026-10 (CAS): MEAN (pre-CAS running average) | SPOT (CAS day,
+    # before the freeze) | SYNTH / FUT (auction implied close) | FROZEN | CLOSE
+    # (official CAS close printed). Older files lack the column.
+    "settle_src",
 )
+
+# CAS analytics log (orderflow/cas.py, shadow): logs/YYYY-MM-DD_cas.csv. SNAP
+# rows every CAS_SAMPLE_SECS from CAS_LOG_START to FNO_CLOSE per index, plus
+# one SUMMARY row per index once the close prints (or at the F&O close).
+CAS_LOG_START = (15, 10)
+CAS_SAMPLE_SECS = 15.0
+CAS_SYNTH_STRIKES = 3                 # nearest strikes in the put-call-parity forward
+CAS_SYNTH_MAX_AGE_SECS = 60.0         # option LTPs older than this are ignored
+CAS_LOG_COLUMNS = (
+    "timestamp", "timestamp_ist", "row_type", "index", "phase",
+    "spot", "last_cts", "frozen", "official_close", "print_ist",
+    "fut", "fut_cts", "fut_implied_close",
+    "synth", "synth_cts", "synth_implied_close",
+    "implied_gap", "implied_src", "realized_gap", "realized_gap_bps",
+    "expiry", "nse_eq_status", "nse_fo_status",
+    # NIFTY rows only (the subscribed chain): the level the chain is read
+    # against (orderflow.cas.derivatives_spot — SPOT | FUT | FROZEN), its ATM
+    # strike, and the feed's call / put IV there. Same-strike call and put IV
+    # should agree; if Upstox prices greeks off the frozen index they split
+    # as the futures move through the auction — this pair is the check.
+    "chain_spot", "chain_src", "atm_strike", "iv_ce_atm", "iv_pe_atm",
+)
+# Segment status transitions from the feed's market_info frames (PRE_OPEN_*,
+# NORMAL_OPEN/CLOSE, CLOSING_START/END) — the exchange's own phase clock,
+# logged so the CAS timetable above can be verified against it.
+MARKET_STATUS_LOG_COLUMNS = ("timestamp", "timestamp_ist", "segment", "status")
+# Display context for the dashboard's CAS panel only (gates nothing): the
+# realised close-vs-15:15 gap distribution from
+# research/study_cas_closing_auction.py, 42 sessions 2026-08-03..10-01.
+# Refresh by re-running that study.
+CAS_GAP_REFERENCE: dict[str, dict[str, float]] = {
+    "NIFTY":     {"mean_abs_pts": 38.0, "mean_abs_bps": 15.8, "p90_abs_bps": 30.7, "n": 42},
+    "BANKNIFTY": {"mean_abs_pts": 105.0, "mean_abs_bps": 18.4, "p90_abs_bps": 36.0, "n": 42},
+    "SENSEX":    {"mean_abs_pts": 102.4, "mean_abs_bps": 13.4, "p90_abs_bps": 28.5, "n": 42},
+}
 
 # B3: L5 depth logging (shadow, research-only). The "full" feed already
 # delivers 5 levels per side; the engine keeps only L1 in memory. Every
@@ -648,12 +776,25 @@ SESSION_PHASES: tuple[tuple[tuple[int, int], tuple[int, int], str], ...] = (
     ((13, 0), (14, 0), "EUROPE"),    # European open overlap
     ((14, 0), (15, 30), "CLOSE"),    # MTM / positioning flows
 )
+# From CAS_EFFECTIVE_FROM: CLOSE ends at CTS end and the auction window is
+# its own phase (spot frozen, F&O still live). Pre-CAS sessions keep the old
+# table so their tod_phase labels stay comparable with the retroactive
+# studies — but a CLOSE read must never pool the two eras.
+SESSION_PHASES_CAS: tuple[tuple[tuple[int, int], tuple[int, int], str], ...] = (
+    ((9, 15), (10, 0), "OPEN"),
+    ((10, 0), (11, 30), "MORNING"),
+    ((11, 30), (13, 0), "LUNCH"),
+    ((13, 0), (14, 0), "EUROPE"),
+    ((14, 0), CAS_CTS_END, "CLOSE"),
+    (CAS_CTS_END, FNO_CLOSE, "CAS"),
+)
 
 
 def session_phase(now_ist) -> str:
     """Phase label for a tz-aware IST datetime; '' outside session hours."""
     cur = now_ist.hour * 60 + now_ist.minute
-    for (sh, sm), (eh, em), label in SESSION_PHASES:
+    phases = SESSION_PHASES_CAS if cas_active(now_ist.date()) else SESSION_PHASES
+    for (sh, sm), (eh, em), label in phases:
         if sh * 60 + sm <= cur < eh * 60 + em:
             return label
     return ""

@@ -113,8 +113,7 @@ def serialize_symbol(key: str) -> dict:
 
 
 def serialize_pcr() -> dict:
-    nifty = engine.symbol_states.get("NSE_INDEX|Nifty 50")
-    nifty_ltp = nifty.ltp if nifty else 0.0
+    nifty_ltp = engine.get_live_nifty_ltp() or 0.0
     ratio, ce_sum, pe_sum, window_strikes, atm_strike = (
         engine.pcr_state.get_dynamic_snapshot(nifty_ltp)
         if nifty_ltp > 0
@@ -149,21 +148,6 @@ def serialize_macro() -> dict:
         "regime": vix_regime,
         "text": vix_text,
     }
-    # USDINR compact readout (card was removed from main grid; surface it here)
-    usdinr_key = next(iter(engine.USDINR_KEYS), None)
-    if usdinr_key and usdinr_key in engine.symbol_states:
-        st = engine.symbol_states[usdinr_key]
-        change_pct = None
-        if st.session_open and st.session_open > 0 and st.ltp > 0:
-            change_pct = (st.ltp / st.session_open - 1.0) * 100.0
-        result["USDINR"] = {
-            "value": round(st.ltp, 4) if st.ltp > 0 else None,
-            "session_open": round(st.session_open, 4) if st.session_open else None,
-            "change_pct": round(change_pct, 3) if change_pct is not None else None,
-            "text": bias.get("usdinr_text", ""),
-        }
-    else:
-        result["USDINR"] = {"value": None, "text": "USDINR: awaiting feed"}
     return result
 
 
@@ -320,6 +304,17 @@ def serialize_global_indices() -> dict:
     return get_snapshot().to_payload()
 
 
+def serialize_cas(now_ist: datetime) -> dict:
+    """Closing-auction panel: per-index freeze / implied / printed close, the
+    auction sub-phase, the feed's exchange segment statuses, and the level
+    the option chain is currently read against."""
+    from orderflow.cas import serialize
+    out = serialize(now_ist)
+    value, src = engine.chain_spot(now_ist)
+    out["chain_spot"] = {"value": round(value, 2) if value > 0 else None, "src": src}
+    return out
+
+
 def serialize_oi_flow_timeline() -> dict:
     """Sliding-window OI flow history for the anchored dual-axis chart.
 
@@ -409,9 +404,9 @@ def serialize_oi_chain() -> dict:
     snap = get_snapshot()
     if snap.chain is None:
         return {"available": False, "last_error": snap.last_error, "last_refresh_ts": 0}
-    # Live spot from engine state — NOT the closing price the API returns.
-    nifty_state = engine.symbol_states.get("NSE_INDEX|Nifty 50")
-    live_spot = nifty_state.ltp if nifty_state and nifty_state.ltp > 0 else snap.chain.spot_closing_price
+    # Live chain underlying from engine state — NOT the closing price the API
+    # returns (futures-implied while the cash index is frozen for CAS).
+    live_spot = engine.get_live_nifty_ltp() or snap.chain.spot_closing_price
     mp_strike, _ = compute_max_pain(snap.chain.strikes)
     walls = near_atm_walls(snap.chain.strikes, live_spot, n_strikes_each_side=5)
     clusters = deep_clusters(snap.chain.strikes, live_spot, excluded_window=5, top_n=3)
@@ -465,4 +460,5 @@ def build_state_payload() -> dict:
         "oi_flow_timeline": serialize_oi_flow_timeline(),
         "pre_open": serialize_pre_open(),
         "global_indices": serialize_global_indices(),
+        "cas": serialize_cas(now_ist),
     }

@@ -26,7 +26,6 @@ import json
 import random
 import re
 import ssl
-import threading
 import time
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
@@ -82,16 +81,11 @@ from core.state import *  # noqa: F401, F403
 # Shutdown hardening: Track if graceful shutdown is in progress
 _GRACEFUL_SHUTDOWN_IN_PROGRESS = False
 
-# USDINR active-month key — bootloader mutates this in place via .clear()/.add()
-# once the live expiry is resolved; the seed value is intentionally stale.
-USDINR_KEYS: set[str] = {"NSE_FO|USDINR26MAYFUT"}
-
 # These will be dynamically overwritten by the Bootloader on startup
 INSTRUMENT_KEYS: list[str] = [
     "NSE_INDEX|Nifty 50",
     "NSE_INDEX|Nifty Bank",
     "NSE_INDEX|India VIX",
-    "NSE_FO|USDINR26MAYFUT",
     "MCX_FO|CRUDEOIL26MAYFUT",
     "NSE_EQ|RELIANCE",
     "NSE_EQ|HDFCBANK",
@@ -116,15 +110,14 @@ FOCUS_PRIORITY: dict[str, int] = {
     "NSE_INDEX|Nifty Bank": 0,
     "NSE_INDEX|Nifty 50": 1,
     "BSE_INDEX|SENSEX": 1,  # tied with NIFTY — they correlate tightly
-    "NSE_FO|USDINR26MAYFUT": 2,
     "MCX_FO|CRUDEOIL26MAYFUT": 3,
     "NSE_EQ|HDFCBANK": 4,
     "NSE_EQ|RELIANCE": 5,
     "NSE_INDEX|India VIX": 99,  # VIX is context, not a signal target
 }
 
-# Symbols subscribed and ingested (macro bias / RBI / catalyst still depend on them)
-# but NOT rendered as instrument cards on the main grid. Use the Macro header instead.
+# Symbols subscribed and ingested but NOT rendered as instrument cards on the
+# main grid. Currently empty.
 HIDDEN_FROM_CARDS: set[str] = set()
 
 PCR_EXPIRY_CODE = "26MAY"  # Will be resolved dynamically in bootloader (rebound — must stay local)
@@ -159,11 +152,17 @@ async def get_active_expiry_key(symbol: str, instrument_type: str = "FUT"):
     valid_contracts = []
 
     symbol = symbol.upper()
+    # Multi-venue futures (CRUDEOIL): restrict to the liquid venues,
+    # optionally monthly contracts only — see FUT_VENUE_PREFERENCE.
+    venue_pref = FUT_VENUE_PREFERENCE.get(symbol) if instrument_type == "FUT" else None
+    monthly_re = re.compile(rf"^{re.escape(symbol)}\d{{2}}[A-Z]{{3}}FUT$")
 
     # Filter Master.  Use a real derivative-symbol match instead of a loose
     # startswith check: NIFTY must not accidentally match NIFTYNXT50, etc.
     for tradingsymbol, instruments in _instrument_master_by_symbol.items():
         if not derivative_tradingsymbol_matches(symbol, tradingsymbol, instrument_type):
+            continue
+        if venue_pref and venue_pref[1] and not monthly_re.match(tradingsymbol):
             continue
 
         for m in instruments:
@@ -171,8 +170,11 @@ async def get_active_expiry_key(symbol: str, instrument_type: str = "FUT"):
             # Exact underlying disambiguation. The tradingsymbol regex catches
             # most lookalikes (NIFTYNXT50 vs NIFTY) but SENSEX vs SENSEX50 share
             # a prefix and BOTH start with a digit after the underlying, so the
-            # regex alone can't separate them. The `name` column does.
-            if m.get("name", "") and m["name"] != symbol:
+            # regex alone can't separate them. The `name` column does — compared
+            # space-insensitively, since MCX names its crude "CRUDE OIL".
+            if m.get("name", "") and m["name"].replace(" ", "") != symbol:
+                continue
+            if venue_pref and m.get("exchange", "") not in venue_pref[0]:
                 continue
             # Filter Options vs Futures
             if instrument_type == "OPT" and ("CE" not in tradingsymbol and "PE" not in tradingsymbol):
@@ -198,8 +200,13 @@ async def get_active_expiry_key(symbol: str, instrument_type: str = "FUT"):
     if not valid_contracts:
         return (None, None)
 
-    # Pick the front-month (nearest expiry)
-    valid_contracts.sort(key=lambda x: x["expiry"])
+    # Pick the front-month (nearest expiry); for multi-venue futures the
+    # preferred venue wins first, so a thin earlier-dated twin never does.
+    if venue_pref:
+        venue_rank = {v: i for i, v in enumerate(venue_pref[0])}
+        valid_contracts.sort(key=lambda x: (venue_rank.get(x["exchange"], 99), x["expiry"]))
+    else:
+        valid_contracts.sort(key=lambda x: x["expiry"])
     best_match = valid_contracts[0]
     trading_sym = best_match['trading_symbol']
     expiry_code = None
@@ -269,10 +276,9 @@ PCR_KEYS, PCR_STRIKES = generate_pcr_keys(
 
 # MACRO_SYMBOLS moved to core/config.py (closure-captured by MacroState default_factory).
 
-# SIGNAL_* name strings, SIGNAL_CONFIRMED_SET, SIGNAL_ABBREVIATIONS,
-# REVIEW_ENTRY_*, and UPSTOX_CURRENCY_UNDERLYINGS now live in core/config.py
-# and are re-exported into this module's namespace by `from core.config import *`
-# at the top of the file.
+# SIGNAL_* name strings, SIGNAL_CONFIRMED_SET, SIGNAL_ABBREVIATIONS and
+# REVIEW_ENTRY_* now live in core/config.py and are re-exported into this
+# module's namespace by `from core.config import *` at the top of the file.
 PCR_KEY_SIDE = {key: "CE" for key in PCR_KEYS["CE"]} | {
     key: "PE" for key in PCR_KEYS["PE"]
 }
@@ -294,14 +300,15 @@ currently_tracked_strikes = set()
 async def sync_atm_window(websocket, token_to_instrument):
     global currently_tracked_strikes, PCR_KEY_SIDE, PCR_KEY_STRIKE
     while True:
-        # 1. Get current Nifty LTP
-        nifty_state = symbol_states.get("NSE_INDEX|Nifty 50")
-        if not nifty_state or nifty_state.ltp <= 0:
+        # 1. Chain underlying: live NIFTY spot, or the futures-implied spot
+        #    while the cash index is frozen for the closing auction
+        underlying, _ = chain_spot(datetime.now(IST))
+        if underlying <= 0:
             await asyncio.sleep(10)
             continue
 
         # 2. Calculate ATM window (±100 points)
-        atm = int(round(nifty_state.ltp / 50.0) * 50)
+        atm = int(round(underlying / 50.0) * 50)
         strikes = [atm-100, atm-50, atm, atm+50, atm+100]
 
         # 3. Resolve to numeric tokens and update dictionaries
@@ -340,64 +347,6 @@ async def sync_atm_window(websocket, token_to_instrument):
         await asyncio.sleep(60) # Re-check every minute
 
 
-def _poll_usdinr_bootstrap(headers: dict) -> None:
-    """HTTP fallback for USDINR — polls until WebSocket delivers the first tick."""
-    import requests as _req
-
-    usdinr_key = next(iter(USDINR_KEYS), None)
-    if not usdinr_key or usdinr_key not in symbol_states:
-        return
-    state = symbol_states[usdinr_key]
-    if state.ltp != 0.0:
-        return  # WebSocket already delivering — no need
-
-    encoded = quote(usdinr_key, safe="")
-    url = f"https://api.upstox.com/v2/market-quote/ltp?instrument_key={encoded}"
-    try:
-        resp = _req.get(url, headers=headers, timeout=5)
-        if resp.status_code == 200:
-            payload = resp.json()
-            # Upstox returns key with ":" instead of "|"
-            api_key = usdinr_key.replace("|", ":")
-            ltp = payload.get("data", {}).get(api_key, {}).get("last_price", 0)
-            if ltp and state.ltp == 0.0:  # double-check WS hasn't arrived
-                state.ltp = ltp
-                if state.session_open is None:
-                    state.session_open = ltp
-                state.last_tick_ts = time.time()
-                console.print(f"[green][OK] USDINR bootstrap via HTTP: {ltp:.4f}[/green]")
-    except Exception:
-        pass
-
-
-def fetch_macro_worker():
-    """USDINR HTTP bootstrap fallback — polls until WebSocket delivers first tick."""
-    import time
-
-    usdinr_bootstrapped = False
-
-    while True:
-        upstox_headers = {"Accept": "application/json", "Authorization": f"Bearer {ACCESS_TOKEN}"}
-
-        # USDINR bootstrap fallback — poll until WS delivers first tick
-        if not usdinr_bootstrapped:
-            usdinr_key = next(iter(USDINR_KEYS), None)
-            ws_alive = (
-                usdinr_key
-                and usdinr_key in symbol_states
-                and symbol_states[usdinr_key].ltp != 0.0
-            )
-            if ws_alive:
-                usdinr_bootstrapped = True
-            else:
-                _poll_usdinr_bootstrap(upstox_headers)
-
-        if usdinr_bootstrapped:
-            return  # Job done — no more polling needed
-
-        time.sleep(5)
-
-
 def split_upstox_instrument_key(instrument_key: str) -> tuple[str, str]:
     exchange, separator, symbol = instrument_key.partition("|")
     if not separator or not exchange or not symbol:
@@ -411,11 +360,6 @@ def instrument_key_uses_numeric_token(instrument_key: str) -> bool:
 
 
 def historical_exchange_preferences(exchange: str, tradingsymbol: str) -> tuple[str, ...]:
-    if tradingsymbol.startswith(UPSTOX_CURRENCY_UNDERLYINGS):
-        if exchange == "NSE_FO":
-            return ("NCD_FO", "NSE_FO", "BCD_FO")
-        if exchange == "BSE_FO":
-            return ("BCD_FO", "BSE_FO", "NCD_FO")
     if exchange == "MCX_FO":
         return ("MCX_FO", "NSE_COM")
     return (exchange,)
@@ -695,6 +639,17 @@ def is_before(now_ist: datetime, hour: int, minute: int) -> bool:
     return (now_ist.hour, now_ist.minute) < (hour, minute)
 
 
+_CAS_BADGES = {
+    "REFERENCE": "CAS reference window (15:00-15:15)",
+    "TRANSITION": "CAS transition (spot frozen)",
+    "ORDER_ENTRY": "CAS order entry (spot frozen)",
+    "LIMIT_ONLY": "CAS limit orders only (spot frozen)",
+    "RANDOM_CLOSE": "CAS random close window",
+    "MATCHING": "CAS matching",
+    "POST_CAS_FNO": "Post-CAS (F&O only)",
+}
+
+
 def get_session_badge(now_ist: datetime) -> str:
     if is_before(now_ist, SESSION_OPEN_HOUR, SESSION_OPEN_MINUTE):
         return "Pre-open (no signals)"
@@ -702,9 +657,29 @@ def get_session_badge(now_ist: datetime) -> str:
         return "Warmup (collecting ticks)"
     if is_before(now_ist, OPENING_DISCOVERY_END_HOUR, OPENING_DISCOVERY_END_MINUTE):
         return "Opening Range (stretch only)"
+    phase = cas_phase(now_ist)
+    if phase:
+        return _CAS_BADGES.get(phase, phase)
+    if is_at_or_after(now_ist, *(FNO_CLOSE if cas_active(now_ist.date()) else PRE_CAS_CLOSE)):
+        return "Closed"
     if is_before(now_ist, EUROPE_WATCH_HOUR, EUROPE_WATCH_MINUTE):
         return "LIVE"
     return "Europe Watch"
+
+
+# Exchange-session guard (CAS freeze / post-close). Synthetic mock ticks carry
+# wall-clock time, so mock_ws_task switches it off — otherwise an evening demo
+# would freeze every card at 15:15.
+_SESSION_GUARD_ENABLED = True
+
+
+def past_continuous_session(display: str, now_ist: datetime) -> bool:
+    """True once `display` stops printing continuous-trading prices today
+    (CAS freeze / auction print / post-close) — see continuous_session_end."""
+    if not _SESSION_GUARD_ENABLED:
+        return False
+    end = continuous_session_end(display, now_ist.date())
+    return end is not None and (now_ist.hour, now_ist.minute) >= end
 
 
 def is_opening_discovery(now_ist: datetime) -> bool:
@@ -1030,16 +1005,6 @@ from analytics.math_stats import (
 )
 
 
-def usdinr_z_multiplier(instrument_key: str, ltp: float) -> float:
-    if instrument_key not in USDINR_KEYS:
-        return 1.0
-
-    near_rbi_level = any(
-        abs(ltp - level) <= RBI_PROXIMITY for level in RBI_INTERVENTION_LEVELS
-    )
-    return USDINR_Z_BOOST if near_rbi_level else 1.0
-
-
 # determine_confirmed_signal + reset_thesis_state + update_thesis_state moved
 # to signals/exhaustion.py (signal-conviction-lifecycle module).
 from signals.exhaustion import (  # noqa: F401
@@ -1311,7 +1276,6 @@ def get_drift_direction(state: SymbolState) -> int:
 # --- PHASE 4: Cross-Asset Suppression ---
 CROSS_ASSET_SUPPRESSION = {
     "MCX_FO|CRUDEOIL26MAYFUT": ["NSE_INDEX|Nifty 50", "NSE_EQ|RELIANCE"],
-    "NSE_FO|USDINR26MAYFUT": ["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"],
     "NSE_EQ|HDFCBANK": ["NSE_INDEX|Nifty Bank"],
 }
 
@@ -1330,6 +1294,12 @@ def is_cross_asset_suppressed(instrument_key: str) -> bool:
 # check_gamma_flush moved to orderflow/gamma.py.
 from orderflow.gamma import check_gamma_flush  # noqa: F401
 from orderflow.expiry import update_expiry_anchor  # P4 shadow tracker
+from orderflow.cas import (  # closing-auction shadow tracker
+    on_fut_tick as cas_on_fut_tick,
+    on_market_info as cas_on_market_info,
+    on_spot_tick as cas_on_spot_tick,
+    set_expiry_dates as _set_cas_expiry_dates,
+)
 
 
 # ========================= V4.0: ADAPTIVE REGIME ENGINE =========================
@@ -1393,15 +1363,11 @@ def compute_atr_from_buckets(state: SymbolState) -> float:
     return atr
 
 
-# compute_oi_roc + classify_dynamic_regime moved to signals/regimes.py.
-# classify_oi_flow + record_oi_flow_sample + _oi_flow_last_sample_ts moved to
-# orderflow/oi_flow.py. Both star-imported here so existing call sites
-# (`classify_dynamic_regime(state, ts)`, `classify_oi_flow(nifty_state)`, etc.)
-# resolve unchanged. signals.regimes already imports the orderflow names; the
-# explicit import below mirrors them into GammaLeak's namespace too.
+# classify_dynamic_regime lives in signals/regimes.py; classify_oi_flow +
+# record_oi_flow_sample + _oi_flow_last_sample_ts in orderflow/oi_flow.py.
+# Both star-imported here so existing names resolve from this namespace.
 from orderflow.oi_flow import *  # noqa: F401, F403
 from signals.regimes import *  # noqa: F401, F403
-from signals.vol_regime import update_nifty_vol_state
 from analytics.vol_surface import set_expiry_date as _set_vol_expiry_date
 
 
@@ -1422,36 +1388,32 @@ def update_oi_roc_tracking(instrument_key: str, oi: float, timestamp: float) -> 
         pcr_state.oi_history_pe[strike].append((timestamp, oi))
 
 
-def update_option_ltp(instrument_key: str, ltp: float) -> None:
-    """Store latest option LTP per strike for straddle box calculation."""
+def update_option_ltp(instrument_key: str, ltp: float, timestamp: float | None = None) -> None:
+    """Store latest option LTP (and its arrival time) per strike for the
+    straddle box and the CAS put-call-parity forward."""
     if instrument_key not in PCR_KEY_SIDE or instrument_key not in PCR_KEY_STRIKE:
         return
     strike = PCR_KEY_STRIKE[instrument_key]
     side = PCR_KEY_SIDE[instrument_key]
+    ts = timestamp if timestamp is not None else time.time()
     if side == "CE":
         pcr_state.ce_ltp_by_strike[strike] = ltp
+        pcr_state.ce_ltp_ts_by_strike[strike] = ts
     else:
         pcr_state.pe_ltp_by_strike[strike] = ltp
+        pcr_state.pe_ltp_ts_by_strike[strike] = ts
 
 
-def compute_straddle_box(state: SymbolState) -> tuple[float, float]:
-    """Calculate implied upper/lower range from ATM straddle premium + VWAP anchor.
-    Returns (implied_upper, implied_lower). Falls back to (0, 0) if data missing."""
-    if not STRADDLE_BOX_ENABLED or state.ltp <= 0 or state.vwap <= 0:
-        return 0.0, 0.0
-
-    atm = int(round(state.ltp / 50.0) * 50)
-    ce_ltp = pcr_state.ce_ltp_by_strike.get(atm, 0.0)
-    pe_ltp = pcr_state.pe_ltp_by_strike.get(atm, 0.0)
-
-    if ce_ltp <= 0 or pe_ltp <= 0:
-        return 0.0, 0.0
-
-    premium = ce_ltp + pe_ltp
-    state.straddle_premium = premium
-    state.implied_upper = state.vwap + (premium / 2)
-    state.implied_lower = state.vwap - (premium / 2)
-    return state.implied_upper, state.implied_lower
+# Option-chain analytics (OI RoC, OI flow, GEX, straddle box, vol surface,
+# gamma flush) live in orderflow/chain.py, outside the signal engine, read
+# against chain_spot: the live NIFTY spot, or the futures-implied spot while
+# the cash index is frozen for the closing auction.
+from orderflow.chain import (  # noqa: F401
+    NIFTY_SPOT_KEY,
+    chain_spot,
+    compute_straddle_box,
+    update_chain_analytics,
+)
 
 
 def check_anchor_alignment(side: int) -> tuple[bool, str]:
@@ -1579,9 +1541,9 @@ def update_signal_engine(
     prev_alert_side = state.alert_side
 
     profile = get_symbol_profile(instrument_key)
-    base_alert_z = profile["alert_z"] * usdinr_z_multiplier(instrument_key, state.ltp)
-    base_confirm_z = profile["confirm_z"] * usdinr_z_multiplier(instrument_key, state.ltp)
-    base_exit_z = profile["exit_z"] * usdinr_z_multiplier(instrument_key, state.ltp)
+    base_alert_z = profile["alert_z"]
+    base_confirm_z = profile["confirm_z"]
+    base_exit_z = profile["exit_z"]
     exhaustion_peak = profile["exhaustion_peak"]
     er_threshold = profile["er_trend_threshold"]
     hurst_threshold = profile["hurst_trend_threshold"]
@@ -1606,8 +1568,16 @@ def update_signal_engine(
         return
 
     # Institutional Phase 1: Event blackout — silence the engine ±15min around
-    # scheduled macro events and inside the Thursday 15:00–15:30 expiry pin.
-    blackout = check_event_blackout(now_ist)
+    # scheduled macro events and inside the expiry-day pin window. Past the
+    # instrument's continuous session (CAS freeze from 15:15 for spot indices
+    # and F&O stocks, F&O close for futures, 15:30 pre-CAS) the same path
+    # applies: the price is a frozen value or an auction/post-close print, and
+    # a replayed CAS day showed |Z| -> cap by 15:27 then ALERT + TREND_KILL
+    # rows on the close print. An open signal is closed out and logged here.
+    if past_continuous_session(get_display_name(instrument_key), now_ist):
+        blackout = "CAS FREEZE" if cas_active(now_ist.date()) else "SESSION CLOSED"
+    else:
+        blackout = check_event_blackout(now_ist)
     state.event_blackout_reason = blackout
     if blackout:
         state.sig_state = 0
@@ -1672,21 +1642,13 @@ def update_signal_engine(
     # AND Hurst >= 0.55 to actually FIRE a momentum signal, so this only
     # widens the silence-zone, not the signal universe.
     regime_trending = er_trending or hurst_trending
-    if usdinr_z_multiplier(instrument_key, state.ltp) != 1.0:
-        regime_tags.append("RBI ZONE")
 
-    # V4.0: Run adaptive regime classifier (only for Nifty spot)
-    if instrument_key == "NSE_INDEX|Nifty 50":
-        dyn_regime = classify_dynamic_regime(state, state.last_tick_ts or time.time())
+    # V4.0: Run adaptive regime classifier (only for Nifty spot). Its chain
+    # inputs (ATM OI RoC) and the straddle box / vol surface are refreshed by
+    # update_chain_analytics in record_tick, ahead of this call.
+    if instrument_key == NIFTY_SPOT_KEY:
+        dyn_regime = classify_dynamic_regime(state)
         state.dynamic_regime = dyn_regime
-
-        # Compute straddle-implied box
-        compute_straddle_box(state)
-
-        # Phase 5: vol surface (throttled to VOL_SAMPLE_INTERVAL_SECS)
-        if (state.last_tick_ts or 0.0) - state._last_vol_surface_ts >= VOL_SAMPLE_INTERVAL_SECS:
-            update_nifty_vol_state(state, state.last_tick_ts or time.time())
-            state._last_vol_surface_ts = state.last_tick_ts or time.time()
 
         # Cross-asset anchor gate (side-aware, computed after Z-score)
         _anchor_side = 1 if state.z_score > 0 else -1 if state.z_score < 0 else 0
@@ -2078,6 +2040,7 @@ from orderflow.aggressor import (
 SPOT_TO_FUT_DISPLAY_MIRROR: dict[str, str] = {
     "NIFTY":     "NIFTY_FUT",
     "BANKNIFTY": "BN_FUT",
+    "SENSEX":    "SENSEX_FUT",
 }
 
 
@@ -2150,8 +2113,7 @@ def update_pcr_snapshot(instrument_key: str, oi: float | None, timestamp: float)
         pcr_state.prev_ce_oi = pcr_state.ce_oi.copy()
         pcr_state.prev_pe_oi = pcr_state.pe_oi.copy()
         pcr_state.oi_snapshot_ts = timestamp
-        nifty_st = symbol_states.get("NSE_INDEX|Nifty 50")
-        pcr_state.ltp_at_oi_snapshot = nifty_st.ltp if nifty_st else 0.0
+        pcr_state.ltp_at_oi_snapshot, _ = chain_spot(datetime.fromtimestamp(timestamp, IST))
 
 
 def update_option_greeks(
@@ -2193,6 +2155,36 @@ def update_option_greeks(
     pcr_state.tsq_by_strike[strike] = tsq
 
 
+def _record_post_session_tick(
+    instrument_key: str,
+    state: SymbolState,
+    ltp: float,
+    timestamp: float,
+    tick_ist: datetime,
+    log_queue: asyncio.Queue | None,
+    oi: float | None,
+    ltt: int,
+    ltq: int,
+) -> None:
+    """A tick after the instrument's continuous session ended (CAS freeze,
+    auction print, post-close session). The raw tape is kept — ltp, log row,
+    expiry/CAS trackers — but nothing statistical consumes it: a frozen
+    series reads as zero variance and the close print as a 5-10σ shock.
+    σ, VWAP, Z, ATR, CVD and regime stats hold their last continuous values.
+    """
+    state.ltp = ltp
+    state.last_tick_ts = timestamp
+    state.ltt = ltt
+    state.ltq = ltq
+    if oi is not None and oi > 0:
+        state.oi = oi
+    update_signal_engine(instrument_key, state, now_ist=tick_ist)
+    if instrument_key == NIFTY_SPOT_KEY:
+        update_expiry_anchor(state, timestamp)
+    if log_queue is not None:
+        log_queue.put_nowait(build_log_row(instrument_key, state, timestamp))
+
+
 def record_tick(
     instrument_key: str,
     ltp: float,
@@ -2211,6 +2203,16 @@ def record_tick(
         tick_ist = datetime.fromtimestamp(timestamp, IST)
 
     ensure_session_rollover(state, tick_ist)
+    display = get_display_name(instrument_key)
+    # Closing-auction tracker sees every index/futures tick, frozen or not.
+    if display in INDEX_SPOT_DISPLAYS:
+        cas_on_spot_tick(display, ltp, timestamp, tick_ist)
+    elif display in INDEX_FUT_DISPLAYS:
+        cas_on_fut_tick(display, ltp, timestamp, tick_ist)
+    if past_continuous_session(display, tick_ist):
+        _record_post_session_tick(instrument_key, state, ltp, timestamp, tick_ist,
+                                  log_queue, oi, ltt, ltq)
+        return
     state.ltp = ltp
     state.last_tick_ts = timestamp
     # B2: exchange last-trade time (epoch ms) + quantity, logged beside the
@@ -2312,13 +2314,21 @@ def record_tick(
     update_ohlc_bucket(state, ltp, timestamp)
     compute_atr_from_buckets(state)
 
+    # NIFTY option-chain analytics, driven by the live leg: the spot while it
+    # trades continuously, NIFTY_FUT once the cash index has frozen for the
+    # closing auction (futures and options trade on to the F&O close). Runs
+    # before the signal engine so the regime classifier, conviction factors
+    # and gamma-flush override read this tick's chain.
+    if instrument_key == NIFTY_SPOT_KEY or (
+        display == "NIFTY_FUT" and past_continuous_session("NIFTY", tick_ist)
+    ):
+        nifty_state = symbol_states.get(NIFTY_SPOT_KEY)
+        if nifty_state is not None:
+            update_chain_analytics(nifty_state, timestamp, tick_ist)
+
     update_signal_engine(instrument_key, state, now_ist=tick_ist)
 
-    # V3.0: Gamma flush check (Nifty ticks only)
-    if instrument_key == "NSE_INDEX|Nifty 50":
-        flush_active, flush_side = check_gamma_flush(timestamp)
-        state.gamma_flush_active = flush_active
-        state.gamma_flush_side = flush_side
+    if instrument_key == NIFTY_SPOT_KEY:
         # P4 shadow: expiry settlement anchor + pin tracker. Hooked HERE (not
         # in update_signal_engine) because the 15:00–15:30 expiry blackout
         # short-circuits the signal path during exactly the window this
@@ -2458,6 +2468,16 @@ async def process_message_receiver(raw, tick_queue, token_to_instrument):
     feed_response.ParseFromString(raw)
 
     if feed_response.type == pb.market_info:
+        # The exchange's own phase clock (NORMAL_OPEN -> CLOSING_START -> ...)
+        # — logged so the CAS timetable in config can be checked against it.
+        try:
+            cas_on_market_info(
+                {seg: pb.MarketStatus.Name(st)
+                 for seg, st in feed_response.marketInfo.segmentStatus.items()},
+                time.time(),
+            )
+        except Exception:
+            pass
         return
 
     timestamp = time.time()
@@ -2479,7 +2499,7 @@ async def process_message_receiver(raw, tick_queue, token_to_instrument):
                 update_option_greeks(inst_key, *greeks, timestamp)
 
             # V4.0: Track per-strike option LTP + rolling OI history for RoC
-            update_option_ltp(inst_key, ft.ltp)
+            update_option_ltp(inst_key, ft.ltp, timestamp)
             if ft.oi is not None:
                 update_oi_roc_tracking(inst_key, ft.oi, timestamp)
 
@@ -2569,28 +2589,10 @@ def pcr_direction(ratio: float | None) -> int:
 
 
 def get_live_nifty_ltp() -> float | None:
-    nifty_key = "NSE_INDEX|Nifty 50"
-    state = symbol_states.get(nifty_key)
-    if state is None or state.ltp <= 0:
-        return None
-    return state.ltp
-
-
-def usdinr_direction() -> tuple[int, str]:
-    usdinr_key = next((key for key in USDINR_KEYS if key in symbol_states), None)
-    if usdinr_key is None:
-        return 0, "USDINR: awaiting live"
-
-    state = symbol_states[usdinr_key]
-    if state.session_open is None or state.ltp == 0.0:
-        return 0, "USDINR: awaiting open"
-
-    move = state.ltp - state.session_open
-    if abs(move) < USDINR_FLAT_MOVE:
-        direction = 0
-    else:
-        direction = -1 if move > 0 else 1
-    return direction, f"USDINR: {state.ltp:,.2f} vs open {state.session_open:,.2f}"
+    """NIFTY level for chain-relative reads (PCR window): the chain underlying
+    — futures-implied while the cash index is frozen for the auction."""
+    underlying, _ = chain_spot(get_reference_time_ist())
+    return underlying if underlying > 0 else None
 
 
 def get_vix_state() -> tuple[float, str, str]:
@@ -2634,15 +2636,11 @@ def vix_z_scale() -> float:
 
 
 def compute_desk_bias() -> dict[str, object]:
-    usdinr_dir, usdinr_text = usdinr_direction()
     nifty_ltp = get_live_nifty_ltp()
     pcr_ratio = pcr_state.get_dynamic_ratio(nifty_ltp) if nifty_ltp is not None else None
     pcr_dir_value = pcr_direction(pcr_ratio)
 
-    total_score = (
-        usdinr_dir * MACRO_BIAS_WEIGHTS["USDINR"]
-        + pcr_dir_value * MACRO_BIAS_WEIGHTS["PCR"]
-    )
+    total_score = pcr_dir_value * MACRO_BIAS_WEIGHTS["PCR"]
 
     if total_score >= MACRO_BIAS_BULLISH_THRESHOLD:
         label = "Bullish"
@@ -2660,7 +2658,6 @@ def compute_desk_bias() -> dict[str, object]:
     return {
         "label": label,
         "score": total_score,
-        "usdinr_text": usdinr_text,
         "pcr_text": pcr_text,
         "vix_text": vix_text,
         "vix_regime": vix_regime,
@@ -3370,11 +3367,13 @@ async def dashboard_task(live: Live, log_path: Path) -> None:
 
 
 async def mock_ws_task(log_queue: asyncio.Queue) -> None:
+    global _SESSION_GUARD_ENABLED
     console.print("\n[bold yellow]No usable API token found. Running in mock simulation mode.[/bold yellow]\n")
+    _SESSION_GUARD_ENABLED = False   # synthetic ticks: no exchange timetable to respect
 
     # Build baselines from dynamically resolved INSTRUMENT_KEYS
     _mock_prices = {
-        "NIFTY": 22500.0, "BANKNIFTY": 48000.0, "USDINR": 93.50,
+        "NIFTY": 22500.0, "BANKNIFTY": 48000.0,
         "CRUDEOIL": 11500.0, "RELIANCE": 2900.0, "HDFCBANK": 1500.0,
     }
     baselines: dict[str, float] = {}
@@ -3387,8 +3386,7 @@ async def mock_ws_task(log_queue: asyncio.Queue) -> None:
         timestamp = time.time()
         for instrument_key, state in symbol_states.items():
             if instrument_key not in baselines: continue
-            if "USDINR" in instrument_key: baselines[instrument_key] += random.uniform(-0.03, 0.03)
-            else: baselines[instrument_key] += random.uniform(-5.0, 5.0)
+            baselines[instrument_key] += random.uniform(-5.0, 5.0)
 
             ltp = baselines[instrument_key]
             if instrument_key.startswith("NSE_INDEX|") or instrument_key.startswith("BSE_INDEX|"):
@@ -3456,6 +3454,20 @@ async def _prefetch_prior_closes(instrument_keys: list[str]) -> None:
 _prior_close_seed: dict[str, float] = {}
 
 
+def _master_expiry_date(instrument_key: str | None) -> date | None:
+    """Expiry date of a resolved contract key, from the loaded instrument master."""
+    if not instrument_key or not _instrument_master_by_symbol:
+        return None
+    for insts in _instrument_master_by_symbol.values():
+        m = next((m for m in insts if m.get("instrument_key") == instrument_key), None)
+        if m is not None:
+            try:
+                return date.fromisoformat(m.get("expiry", ""))
+            except ValueError:
+                return None
+    return None
+
+
 async def resolve_dynamic_instruments():
     """Runs on boot. Resolves active expiries and updates all core dictionaries."""
     global PCR_EXPIRY_CODE, INSTRUMENT_KEYS, SUBSCRIPTION_KEYS, PCR_KEYS, PCR_STRIKES
@@ -3465,7 +3477,6 @@ async def resolve_dynamic_instruments():
     
     nifty_key, nifty_expiry = await get_active_expiry_key("NIFTY", "OPT")
     crude_key, _ = await get_active_expiry_key("CRUDEOIL", "FUT")
-    usdinr_key, _ = await get_active_expiry_key("USDINR", "FUT")
     nifty_fut_key, _ = await get_active_expiry_key("NIFTY", "FUT")
     banknifty_fut_key, _ = await get_active_expiry_key("BANKNIFTY", "FUT")
     sensex_fut_key, _ = await get_active_expiry_key("SENSEX", "FUT")
@@ -3480,28 +3491,28 @@ async def resolve_dynamic_instruments():
         PCR_EXPIRY_CODE = nifty_expiry
         console.print(f"[green][OK] NIFTY Options Expiry: {PCR_EXPIRY_CODE}[/green]")
         # Resolve full ISO expiry date for expiry-day vol surface guards
-        if nifty_key and _instrument_master_by_symbol:
-            for _insts in _instrument_master_by_symbol.values():
-                _m = next((m for m in _insts if m.get("instrument_key") == nifty_key), None)
-                if _m and _m.get("expiry"):
-                    try:
-                        _set_vol_expiry_date(date.fromisoformat(_m["expiry"]))
-                        console.print(f"[green][OK] Vol surface expiry date: {_m['expiry']}[/green]")
-                    except ValueError:
-                        pass
-                    break
+        _nifty_exp = _master_expiry_date(nifty_key)
+        if _nifty_exp is not None:
+            _set_vol_expiry_date(_nifty_exp)
+            console.print(f"[green][OK] Vol surface expiry date: {_nifty_exp}[/green]")
     else:
         missing.append("NIFTY OPT (weekly/monthly)")
+
+    # CAS tracker expiry flags: each index settles its own expiries on the
+    # auction close (NIFTY weeklies Tue, SENSEX weeklies Thu, BANKNIFTY
+    # monthly; holiday weeks shift — the master's dates are authoritative).
+    _bn_opt_key, _ = await get_active_expiry_key("BANKNIFTY", "OPT")
+    _sx_opt_key, _ = await get_active_expiry_key("SENSEX", "OPT")
+    _set_cas_expiry_dates({
+        "NIFTY": _master_expiry_date(nifty_key),
+        "BANKNIFTY": _master_expiry_date(_bn_opt_key),
+        "SENSEX": _master_expiry_date(_sx_opt_key),
+    })
 
     if crude_key:
         console.print(f"[green][OK] CRUDEOIL Futures: {crude_key}[/green]")
     else:
         missing.append("CRUDEOIL FUT (MCX)")
-
-    if usdinr_key:
-        console.print(f"[green][OK] USDINR Futures: {usdinr_key}[/green]")
-    else:
-        missing.append("USDINR FUT (NSE_FO/NCD_FO)")
 
     if nifty_fut_key:
         console.print(f"[green][OK] NIFTY Futures (front-month): {nifty_fut_key}[/green]")
@@ -3541,7 +3552,6 @@ async def resolve_dynamic_instruments():
         VIX_INSTRUMENT_KEY,
         nifty_fut_key,
         banknifty_fut_key,
-        usdinr_key,
         crude_key,
         "NSE_EQ|RELIANCE",
         "NSE_EQ|HDFCBANK",
@@ -3549,29 +3559,16 @@ async def resolve_dynamic_instruments():
     if sensex_fut_key:
         INSTRUMENT_KEYS.append(sensex_fut_key)
 
-    DISPLAY_NAMES[usdinr_key] = "USDINR"
     DISPLAY_NAMES[crude_key] = "CRUDEOIL"
     DISPLAY_NAMES[nifty_fut_key] = "NIFTY_FUT"
     DISPLAY_NAMES[banknifty_fut_key] = "BN_FUT"
     if sensex_fut_key:
         DISPLAY_NAMES[sensex_fut_key] = "SENSEX_FUT"
-    FOCUS_PRIORITY[usdinr_key] = 2
     FOCUS_PRIORITY[crude_key] = 3
     FOCUS_PRIORITY[nifty_fut_key] = 6
     FOCUS_PRIORITY[banknifty_fut_key] = 7
     if sensex_fut_key:
         FOCUS_PRIORITY[sensex_fut_key] = 8
-
-    # Sync USDINR_KEYS with the resolved numeric token. Without this the
-    # HTTP bootstrap poll + usdinr_direction() lookup at runtime both fail
-    # silently because they search for the hardcoded string key while
-    # symbol_states is populated under the resolved exchange-token key.
-    USDINR_KEYS.clear()
-    USDINR_KEYS.add(usdinr_key)
-
-    # Hide USDINR from the main card grid. WS subscription, macro bias,
-    # RBI proximity, and Sonar catalyst checks remain active.
-    HIDDEN_FROM_CARDS.add(usdinr_key)
 
     # Pre-open: fetch prior trading-day daily close for NIFTY/BANKNIFTY spot + futures
     # so gap_pct can be computed at the first tick. Failure is non-fatal — gap_pct stays 0.
@@ -3630,26 +3627,17 @@ async def resolve_dynamic_instruments():
             f"[green][OK] PCR option resolution: {len(resolved_pcr)}/{len(PCR_KEY_SIDE)} keys resolved for {PCR_EXPIRY_CODE}[/green]"
         )
 
-    # --- CRITICAL: Update USDINR_KEYS with resolved key ---
-    USDINR_KEYS.clear()
-    USDINR_KEYS.add(usdinr_key)
-    console.print(f"[green][OK] USDINR_KEYS updated: {USDINR_KEYS}[/green]")
-
     # --- CRITICAL: Rebuild CROSS_ASSET_SUPPRESSION with resolved keys ---
     CROSS_ASSET_SUPPRESSION.clear()
     CROSS_ASSET_SUPPRESSION[crude_key] = ["NSE_INDEX|Nifty 50", "NSE_EQ|RELIANCE"]
-    CROSS_ASSET_SUPPRESSION[usdinr_key] = ["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"]
     CROSS_ASSET_SUPPRESSION["NSE_EQ|HDFCBANK"] = ["NSE_INDEX|Nifty Bank"]
-    
+
     # Also update old April key mappings to May for consistency
     old_april_crude = "MCX_FO|CRUDEOIL26APRFUT"
-    old_april_usdinr = "NSE_FO|USDINR26APRFUT"
     if old_april_crude in DISPLAY_NAMES:
         del DISPLAY_NAMES[old_april_crude]
-    if old_april_usdinr in DISPLAY_NAMES:
-        del DISPLAY_NAMES[old_april_usdinr]
 
-    console.print(f"[green][OK] Cross-asset suppression and USDINR keys updated[/green]")
+    console.print(f"[green][OK] Cross-asset suppression updated[/green]")
 
 
 _last_roll_date: date | None = None
@@ -3677,9 +3665,10 @@ async def expiry_auto_roll() -> None:
         # Force-refresh instrument master (clear cache so we get fresh data)
         _instrument_master_by_symbol = None
 
-        old_usdinr = next(iter(USDINR_KEYS), None)
+        # By display name: resolved keys are numeric tokens (MCX_FO|569900),
+        # so a "CRUDEOIL" substring test never matched and rolls went unseen.
         old_crude = next(
-            (k for k in INSTRUMENT_KEYS if "CRUDEOIL" in k), None
+            (k for k in INSTRUMENT_KEYS if DISPLAY_NAMES.get(k) == "CRUDEOIL"), None
         )
 
         try:
@@ -3689,17 +3678,11 @@ async def expiry_auto_roll() -> None:
             await asyncio.sleep(60)
             continue
 
-        new_usdinr = next(iter(USDINR_KEYS), None)
         new_crude = next(
-            (k for k in INSTRUMENT_KEYS if "CRUDEOIL" in k), None
+            (k for k in INSTRUMENT_KEYS if DISPLAY_NAMES.get(k) == "CRUDEOIL"), None
         )
 
         rolled = []
-        if old_usdinr and new_usdinr and old_usdinr != new_usdinr:
-            rolled.append(f"USDINR: {old_usdinr} → {new_usdinr}")
-            # Migrate state to new key
-            if old_usdinr in symbol_states:
-                symbol_states[new_usdinr] = symbol_states.pop(old_usdinr)
         if old_crude and new_crude and old_crude != new_crude:
             rolled.append(f"CRUDEOIL: {old_crude} → {new_crude}")
             if old_crude in symbol_states:
@@ -3754,11 +3737,6 @@ async def run_live_mode() -> None:
     # --- CRITICAL FIX: Resolve keys BEFORE building symbol_states ---
     await resolve_dynamic_instruments()
     reset_runtime_state()
-
-    # --- PHASE 0: Start async macro worker thread ---
-    macro_worker = threading.Thread(target=fetch_macro_worker, daemon=True)
-    macro_worker.start()
-    console.print("[green][OK] Macro worker thread started[/green]")
 
     # --- V5.0: Pre-market FII/DII fetch ---
     if FII_BOOT_ENABLED and _FII_AVAILABLE:
@@ -3868,7 +3846,7 @@ async def run_preflight() -> None:
         except Exception as exc:
             console.print(f"[bold red][FAIL] Instrument Master: {exc}[/bold red]")
 
-        for symbol, instrument_type in [("NIFTY", "OPT"), ("CRUDEOIL", "FUT"), ("USDINR", "FUT"), ("NIFTY", "FUT"), ("BANKNIFTY", "FUT")]:
+        for symbol, instrument_type in [("NIFTY", "OPT"), ("CRUDEOIL", "FUT"), ("NIFTY", "FUT"), ("BANKNIFTY", "FUT")]:
             try:
                 key, expiry_code = await get_active_expiry_key(symbol, instrument_type)
                 if key and expiry_code:

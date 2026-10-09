@@ -35,7 +35,6 @@ def format_macro_header() -> str:
     quotes_line = "  |  ".join(
         [
             str(bias["vix_text"]),
-            str(bias["usdinr_text"]),
             str(bias["pcr_text"]),
         ]
     )
@@ -148,8 +147,7 @@ def format_thesis_readout(state: SymbolState) -> Text:
 
 
 def format_pcr_footer(log_path: Path) -> str:
-    nifty_state = engine.symbol_states.get("NSE_INDEX|Nifty 50")
-    nifty_ltp = nifty_state.ltp if nifty_state else 0.0
+    nifty_ltp = engine.get_live_nifty_ltp() or 0.0
     ratio, ce_sum, pe_sum, window_strikes, atm_strike = (
         engine.pcr_state.get_dynamic_snapshot(nifty_ltp) if nifty_ltp > 0 else (None, 0.0, 0.0, (), None)
     )

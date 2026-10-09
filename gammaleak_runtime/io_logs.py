@@ -22,10 +22,10 @@ from pathlib import Path
 # `__main__` and `GammaLeak`, so re-importing it re-runs top-level
 # code mid-load).
 from core.config import (
-    DEPTH_FLUSH_ROWS, DEPTH_FLUSH_SECS, DEPTH_LOG_COLUMNS,
+    CAS_LOG_COLUMNS, DEPTH_FLUSH_ROWS, DEPTH_FLUSH_SECS, DEPTH_LOG_COLUMNS,
     EVENT_LOG_COLUMNS, EXPIRY_LOG_COLUMNS, GEX_LOG_COLUMNS, IST,
     LOG_BATCH_SIZE, LOG_COLUMNS, LOG_DIR, LOG_FLUSH_INTERVAL_SECS,
-    OI_STATE_LOG_COLUMNS,
+    MARKET_STATUS_LOG_COLUMNS, OI_STATE_LOG_COLUMNS,
 )
 from core.state import console
 
@@ -174,13 +174,14 @@ def append_expiry_row(
     settle_est: float | None, settle_n: int,
     pin_strike: int, pin_src: str, pin_mass: float,
     pin_dist: float | None, mins_to_close: float,
+    settle_src: str = "",
 ) -> None:
     """Append one expiry-anchor snapshot to logs/YYYY-MM-DD_expiry.csv.
 
-    Written only on the resolved expiry day, 13:00→15:30 (see
-    orderflow/expiry.py) — ~150 rows per expiry. settle_est/pin_dist are ""
-    outside their valid ranges rather than 0, so parsers can't mistake
-    'not yet' for 'at the strike'.
+    Written only on the resolved expiry day, 13:00→close (15:30 pre-CAS,
+    15:40 since; see orderflow/expiry.py) — ~150 rows per expiry.
+    settle_est/pin_dist are "" outside their valid ranges rather than 0, so
+    parsers can't mistake 'not yet' for 'at the strike'.
     """
     path = get_expiry_log_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -193,12 +194,85 @@ def append_expiry_row(
         str(pin_strike), pin_src, f"{pin_mass:.4f}",
         (f"{pin_dist:+.2f}" if pin_dist is not None else ""),
         f"{mins_to_close:.1f}",
+        settle_src,
     )
     with path.open("a", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         if write_header:
             writer.writerow(EXPIRY_LOG_COLUMNS)
         writer.writerow(row)
+
+
+def get_cas_log_path(trading_day: date | None = None) -> Path:
+    active_day = trading_day or datetime.now(IST).date()
+    return LOG_DIR / f"{active_day.isoformat()}_cas.csv"
+
+
+def _fmt(v: float | None, spec: str = ".2f") -> str:
+    """'' for missing/unobserved (None or 0.0) so parsers can't read 'not yet' as 0."""
+    return format(v, spec) if v else ""
+
+
+def append_cas_row(timestamp: float, row_type: str, index: str, phase: str, s,
+                   status: dict[str, str], chain: dict | None = None) -> None:
+    """Append one CAS tracker row to logs/YYYY-MM-DD_cas.csv.
+
+    `s` is the index's CASIndexState. SNAP rows every CAS_SAMPLE_SECS through
+    the auction window, one SUMMARY row per index once the close prints —
+    ~360 rows a day. Unobserved prices log as "" rather than 0. `chain`
+    carries the NIFTY option-chain columns (empty for the other indices).
+    """
+    chain = chain or {}
+    # File date from the row's own timestamp (not the wall clock), so replays
+    # and backtests land in the session they describe.
+    row_dt = datetime.fromtimestamp(timestamp, IST)
+    path = get_cas_log_path(row_dt.date())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists()
+    ts_ist = row_dt.strftime("%Y-%m-%d %H:%M:%S")
+    realized = (s.official_close - s.frozen) if (s.official_close and s.frozen) else None
+    print_ist = (datetime.fromtimestamp(s.print_ts, IST).strftime("%H:%M:%S")
+                 if s.print_ts else "")
+    row = (
+        f"{timestamp:.3f}", ts_ist, row_type, index, phase,
+        _fmt(s.spot), _fmt(s.last_cts), _fmt(s.frozen), _fmt(s.official_close), print_ist,
+        _fmt(s.fut_now), _fmt(s.fut_cts), _fmt(s.fut_implied_close),
+        _fmt(s.synth_now), _fmt(s.synth_cts), _fmt(s.synth_implied_close),
+        (f"{s.implied_gap:+.2f}" if s.implied_gap is not None else ""), s.implied_src,
+        (f"{realized:+.2f}" if realized is not None else ""),
+        (f"{1e4 * realized / s.frozen:+.1f}" if realized is not None else ""),
+        "1" if s.expiry else "0",
+        status.get("NSE_EQ", ""), status.get("NSE_FO", ""),
+        _fmt(chain.get("chain_spot")), chain.get("chain_src", ""),
+        str(chain["atm_strike"]) if chain.get("atm_strike") else "",
+        (f"{chain['iv_ce_atm']:.4f}" if chain.get("iv_ce_atm") else ""),
+        (f"{chain['iv_pe_atm']:.4f}" if chain.get("iv_pe_atm") else ""),
+    )
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        if write_header:
+            writer.writerow(CAS_LOG_COLUMNS)
+        writer.writerow(row)
+
+
+def get_market_status_log_path(trading_day: date | None = None) -> Path:
+    active_day = trading_day or datetime.now(IST).date()
+    return LOG_DIR / f"{active_day.isoformat()}_market_status.csv"
+
+
+def append_market_status_row(timestamp: float, segment: str, status: str) -> None:
+    """Append one segment-status transition to logs/YYYY-MM-DD_market_status.csv
+    (a few dozen rows a day — only changes are written)."""
+    row_dt = datetime.fromtimestamp(timestamp, IST)
+    path = get_market_status_log_path(row_dt.date())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists()
+    ts_ist = row_dt.strftime("%Y-%m-%d %H:%M:%S")
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        if write_header:
+            writer.writerow(MARKET_STATUS_LOG_COLUMNS)
+        writer.writerow((f"{timestamp:.3f}", ts_ist, segment, status))
 
 
 def get_depth_log_path(symbol: str, trading_day: date | None = None) -> Path:

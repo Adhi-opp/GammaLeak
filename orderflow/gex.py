@@ -21,8 +21,10 @@ excluded), front-expiry only, and the sign convention is unproven for Indian
 weeklies where retail net-buys both wings. The per-strike snapshot log exists
 precisely so the sign model can be re-derived offline without re-collecting.
 
-`update_gex` follows the oi_flow module pattern: called on every NIFTY tick
-from classify_dynamic_regime, throttles itself via a module-level timestamp.
+`update_gex` follows the oi_flow module pattern: called on every chain
+refresh (orderflow/chain.py), throttles itself via a module-level timestamp.
+The snapshot's `spot` column is the chain underlying: the live index, or the
+futures-implied spot inside the CAS window (cash frozen, options live).
 """
 from __future__ import annotations
 
@@ -87,7 +89,7 @@ def compute_gex(spot: float, now: float) -> tuple[float, float, float, list[tupl
     return gex_ce, gex_pe, net_1pct, rows
 
 
-def update_gex(nifty_state: SymbolState, timestamp: float) -> None:
+def update_gex(nifty_state: SymbolState, underlying: float, timestamp: float) -> None:
     """Throttled per-minute GEX refresh + snapshot append. Mutates
     nifty_state.gex_ce / gex_pe / gex_net_1pct; leaves them untouched (stale
     values persist) when the chain can't currently support a read."""
@@ -96,7 +98,7 @@ def update_gex(nifty_state: SymbolState, timestamp: float) -> None:
         return
     _last_gex_ts = timestamp
 
-    out = compute_gex(nifty_state.ltp, timestamp)
+    out = compute_gex(underlying, timestamp)
     if out is None:
         return
     gex_ce, gex_pe, net_1pct, rows = out
@@ -105,6 +107,6 @@ def update_gex(nifty_state: SymbolState, timestamp: float) -> None:
     nifty_state.gex_net_1pct = net_1pct
     # Disk errors must never propagate into the tick path (io_logs contract).
     try:
-        append_gex_snapshot(timestamp, nifty_state.ltp, rows, net_1pct)
+        append_gex_snapshot(timestamp, underlying, rows, net_1pct)
     except Exception:
         pass

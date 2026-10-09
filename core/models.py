@@ -259,6 +259,34 @@ class PositioningState:
 
 
 @dataclass
+class CASIndexState:
+    """Closing-auction tracker for one index (orderflow/cas.py, shadow).
+
+    Prices are index points; 0.0 means "not observed yet" (an engine restart
+    inside the auction leaves `frozen` unknown rather than guessing it).
+    """
+    day: date | None = None
+    last_cts: float = 0.0              # last spot print before CAS_CTS_END
+    frozen: float = 0.0                # the 15:15 value the index holds through the auction
+    official_close: float = 0.0        # CAS-derived close, once printed
+    print_ts: float = 0.0              # arrival time of the close print
+    spot: float = 0.0                  # latest spot (frozen / close during CAS)
+    fut_cts: float = 0.0               # futures at CTS end — anchors the basis
+    basis_cts: float | None = None     # fut_cts - last_cts, fixed at the freeze
+    fut_now: float = 0.0
+    fut_implied_close: float = 0.0     # fut_now - basis_cts
+    synth_cts: float = 0.0             # parity forward at CTS end (NIFTY only)
+    carry_cts: float | None = None     # synth_cts - last_cts, fixed at the freeze
+    synth_now: float = 0.0
+    synth_implied_close: float = 0.0   # synth_now - carry_cts
+    implied_gap: float | None = None   # best implied close - frozen
+    implied_src: str = ""              # SYNTH | FUT
+    implied_close_at_lock: float = 0.0 # implied close when order entry locked (15:28)
+    expiry: bool = False               # an expiry of this index settles on today's close
+    summary_logged: bool = False
+
+
+@dataclass
 class MacroQuote:
     value: float | None = None
     change_pct: float | None = None
@@ -293,6 +321,10 @@ class PCRState:
     # V4.0: Per-strike LTP + rolling OI history for Rate of Change
     ce_ltp_by_strike: dict[int, float] = field(default_factory=dict)
     pe_ltp_by_strike: dict[int, float] = field(default_factory=dict)
+    # Arrival time of each LTP above — the CAS parity forward (K + C − P)
+    # must not pair a live call with a put quote from minutes ago.
+    ce_ltp_ts_by_strike: dict[int, float] = field(default_factory=dict)
+    pe_ltp_ts_by_strike: dict[int, float] = field(default_factory=dict)
 
     # B4: latest per-side delta per strike (feed-signed: CE +, PE −)
     delta_by_strike_ce: dict[int, float] = field(default_factory=dict)

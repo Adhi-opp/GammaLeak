@@ -21,6 +21,7 @@ from core.config import (
     OI_FLOW_TIMELINE_SAMPLE_SECS,
 )
 from core.models import (
+    CASIndexState,
     SymbolState,
     MacroState,
     PCRState,
@@ -39,7 +40,6 @@ DISPLAY_NAMES: dict[str, str] = {
     "NSE_INDEX|Nifty Bank": "BANKNIFTY",
     "BSE_INDEX|SENSEX": "SENSEX",
     "NSE_INDEX|India VIX": "VIX",
-    "NSE_FO|USDINR26MAYFUT": "USDINR",
     "MCX_FO|CRUDEOIL26MAYFUT": "CRUDEOIL",
     "NSE_EQ|RELIANCE": "RELIANCE",
     "NSE_EQ|HDFCBANK": "HDFCBANK",
@@ -49,7 +49,7 @@ DISPLAY_NAMES: dict[str, str] = {
 # (e.g., "NSE_INDEX|Nifty 50"). Populated by the WS feed handler on first tick.
 symbol_states: dict[str, SymbolState] = {}
 
-# Macro context (USDINR / PCR / etc.) — mutated in place by the macro poller.
+# Macro quote registry (MACRO_SYMBOLS; currently empty).
 macro_state = MacroState()
 
 # Per-strike CE/PE OI snapshots + rolling histories for OI flow classification.
@@ -64,6 +64,14 @@ oi_levels_state = OILevelsState()
 # Daily dealer/participant positioning anchor (T-1 file, loaded at boot by
 # run_live_mode; consumed by Phase-C DealerState and future serializers).
 positioning_state = PositioningState()
+
+# Closing-auction trackers keyed by index display name (orderflow/cas.py),
+# and the latest exchange segment status from the feed's market_info frames
+# (segment -> status name, e.g. "NSE_EQ" -> "CLOSING_START").
+cas_state: dict[str, CASIndexState] = {
+    name: CASIndexState() for name in ("NIFTY", "BANKNIFTY", "SENSEX")
+}
+market_status: dict[str, str] = {}
 
 # Bounded ring buffer powering the anchored velocity chart on the dashboard.
 # Capacity = window / sample, so 30 min @ 5s = 360 rows max.

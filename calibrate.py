@@ -42,10 +42,13 @@ from core.config import (
     IST,
     MIN_FAVORABLE_POINTS_PER_SYMBOL,
     MFE_ATR_K,
+    PRE_CAS_CLOSE,
     REVIEW_DEFAULT_MIN_FAVORABLE_PCT,
     ER_TREND_THRESHOLD,
     HURST_THRESHOLD,
     HAND_CONVICTION_WEIGHTS,
+    cas_active,
+    continuous_session_end,
     session_phase,
 )
 
@@ -184,20 +187,53 @@ def _per_symbol_floor(symbol: str, entry: float) -> float:
     return abs(entry) * (REVIEW_DEFAULT_MIN_FAVORABLE_PCT / 100.0)
 
 
+def _session_end_ts(date_str: str, symbol: str) -> float | None:
+    """Epoch at which `symbol` stopped printing continuous-trading prices on
+    `date_str` (CAS-aware; see core.config.continuous_session_end), or None
+    for symbols on their own sessions (CRUDEOIL, VIX)."""
+    try:
+        day = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return None
+    end = continuous_session_end(symbol, day.date())
+    if end is None:
+        return None
+    return day.replace(hour=end[0], minute=end[1], tzinfo=IST).timestamp()
+
+
 def grade_fire(
     date_str: str, symbol: str, side: int, entry: float, fire_ts: float,
 ) -> tuple[float, float, bool] | None:
     """Grade one fire. side = stretch side (+1 stretched high -> fade short).
 
     Returns (mfe_points, floor, win) or None if ungradable (insufficient
-    forward data / unknown symbol series).
+    forward data / unknown symbol series / fired after the continuous session).
+
+    The forward window stops at the symbol's continuous-session end: past it
+    a spot index is frozen (CAS, from 15:15) or post-close, and an F&O stock
+    prints an auction or closing price — neither is an excursion a trade
+    could have captured. The CAS close print alone averages 38 NIFTY points
+    (42 sessions), so an untruncated window would grade auction prints as
+    wins and frozen stretches as losses.
     """
     ts, px = load_price_series(date_str, symbol)
     if ts.size == 0 or side == 0:
         return None
 
+    session_end = _session_end_ts(date_str, symbol)
+    if session_end is not None and fire_ts >= session_end:
+        return None
+    horizon = fire_ts + FWD_WINDOW_SECS
+    if session_end is not None:
+        horizon = min(horizon, session_end)
+
     j = int(np.searchsorted(ts, fire_ts, side="left"))
-    k = int(np.searchsorted(ts, fire_ts + FWD_WINDOW_SECS, side="right"))
+    if session_end is not None and horizon >= session_end:
+        # Strictly before the boundary: a tick stamped at the session end is
+        # already the frozen / auction print.
+        k = int(np.searchsorted(ts, session_end, side="left"))
+    else:
+        k = int(np.searchsorted(ts, horizon, side="right"))
     fwd = px[j:k]
     if fwd.size < MIN_FWD_POINTS:
         return None
@@ -212,12 +248,15 @@ def grade_fire(
     fwd_ts = ts[j:k]
     if fwd_ts.size >= 2 and float(np.diff(fwd_ts).max()) > MAX_FWD_GAP_SECS:
         return None
-    try:
-        _close_ts = datetime.strptime(date_str, "%Y-%m-%d").replace(
-            hour=15, minute=30, tzinfo=IST).timestamp()
-    except ValueError:
-        _close_ts = fire_ts + FWD_WINDOW_SECS
-    expected_end = min(fire_ts + FWD_WINDOW_SECS, _close_ts)
+    if session_end is not None:
+        expected_end = horizon
+    else:
+        try:
+            _close_ts = datetime.strptime(date_str, "%Y-%m-%d").replace(
+                hour=PRE_CAS_CLOSE[0], minute=PRE_CAS_CLOSE[1], tzinfo=IST).timestamp()
+        except ValueError:
+            _close_ts = fire_ts + FWD_WINDOW_SECS
+        expected_end = min(fire_ts + FWD_WINDOW_SECS, _close_ts)
     if expected_end - float(fwd_ts[-1]) > MAX_FWD_GAP_SECS:
         return None
 
@@ -338,8 +377,14 @@ def collect(files: list[str]):
                     population[(setup, rb)].append((conv, int(win), False))
                     sym_mfe[symbol].append(mfe)
 
-                    # Shadow conditioning tallies (P3 time-of-day / P1 toxicity)
-                    ph = session_phase(datetime.fromtimestamp(fire_ts, IST))
+                    # Shadow conditioning tallies (P3 time-of-day / P1 toxicity).
+                    # CAS moved the close (CLOSE = 14:00-15:15 since 2026-08-03,
+                    # plus its own CAS window), so CAS-era CLOSE is a separate
+                    # bucket — the two eras are different microstructures.
+                    fire_dt = datetime.fromtimestamp(fire_ts, IST)
+                    ph = session_phase(fire_dt)
+                    if ph == "CLOSE" and cas_active(fire_dt.date()):
+                        ph = "CLOSE-CAS"
                     if ph:
                         phase_pop[ph].append(int(win))
                     tox_raw = (row.get("toxicity") or "").strip()
@@ -578,13 +623,14 @@ def print_shadow_report(shadow) -> None:
 
     phase_pop = shadow.get("phase", {})
     if phase_pop:
-        print("  Time-of-day phase (graded CONFIRMs, phase from fire ts):")
-        for ph in ("OPEN", "MORNING", "LUNCH", "EUROPE", "CLOSE"):
+        print("  Time-of-day phase (graded CONFIRMs, phase from fire ts;")
+        print("  CLOSE = 14:00-15:30 pre-CAS, CLOSE-CAS = 14:00-15:15 from 2026-08-03 — never pool):")
+        for ph in ("OPEN", "MORNING", "LUNCH", "EUROPE", "CLOSE", "CLOSE-CAS", "CAS"):
             wins = phase_pop.get(ph)
             if not wins:
                 continue
             n = len(wins)
-            print(f"    {ph:<8} {sum(wins):3d}/{n:<3d} = {sum(wins)/n*100:3.0f}%")
+            print(f"    {ph:<9} {sum(wins):3d}/{n:<3d} = {sum(wins)/n*100:3.0f}%")
 
     tox = shadow.get("tox", [])
     if len(tox) >= 15:

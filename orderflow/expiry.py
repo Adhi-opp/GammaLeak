@@ -1,15 +1,22 @@
 """Expiry settlement-anchor + pin-strike tracker (research track P4, shadow).
 
-India-specific mechanics: NIFTY weekly options settle to the exchange-computed
-average of the underlying index over the last half hour of expiry day. From
-15:00 every passing tick LOCKS IN part of that settlement price, so writers
-defending a strike boundary face a shrinking-uncertainty problem and their
-hedging becomes progressively more deterministic. This module measures the
-two quantities that hypothesis needs:
+India-specific mechanics, pre-CAS: NIFTY weekly options settled to the
+exchange-computed average of the underlying index over the last half hour of
+expiry day. From 15:00 every passing tick LOCKED IN part of that settlement
+price, so writers defending a strike boundary faced a shrinking-uncertainty
+problem and their hedging became progressively more deterministic.
 
-  settle_est — running mean of spot ticks inside the settlement window (an
-               estimate of the official average; the exchange's exact
-               weighting may differ slightly — treat as a proxy)
+Since 2026-08-03 (CAS) the settlement is the single CAS-derived index close:
+nothing locks in progressively — the index freezes at 15:15 and one auction
+print (15:28-15:30) fixes the settlement while expiring contracts trade on
+to 15:40. On CAS days settle_est follows orderflow/cas.py's implied close and
+then the printed close; the two eras are different mechanisms and must not
+be pooled in the P4 study. This module measures:
+
+  settle_est — pre-CAS: running mean of spot ticks inside the settlement
+               window (a proxy for the official average). CAS days: spot
+               before the freeze, then the auction's implied close
+               (SYNTH/FUT), then the official close (see settle_src)
   pin strike — the strike with maximum gamma MASS, γ(K)·(OI_CE+OI_PE): total
                hedging concentration, sign-agnostic (pinning force does not
                care which side dealers are on). Falls back to the pure-OI
@@ -19,11 +26,11 @@ Observational only: writes state fields + logs/<date>_expiry.csv rows.
 Nothing gates on this. Validation per proposal P4 needs several expiries of
 collected data (event study vs matched non-expiry afternoons).
 
-Called from record_tick on every NIFTY spot tick — deliberately NOT from the
-signal engine, because the existing 15:00–15:30 expiry blackout short-circuits
-update_signal_engine during exactly the window this exists to observe.
-Restart caveat: the settlement accumulator lives in module state, so an
-engine restart inside the window restarts the average from that point.
+Called from record_tick on every NIFTY spot tick — including frozen CAS
+ticks — and deliberately NOT from the signal engine, because the expiry
+blackout short-circuits update_signal_engine during exactly the window this
+exists to observe. Restart caveat: the pre-CAS accumulator lives in module
+state, so an engine restart inside the window restarts the average.
 """
 from __future__ import annotations
 
@@ -31,14 +38,18 @@ from datetime import datetime
 
 from core.config import (
     IST,
+    CAS_MATCHING_START,
     EXPIRY_TRACK_START,
     EXPIRY_SETTLE_START,
     EXPIRY_SETTLE_END,
     EXPIRY_SAMPLE_SECS_PRE,
     EXPIRY_SAMPLE_SECS_SETTLE,
+    FNO_CLOSE,
+    cas_active,
 )
 from core.models import SymbolState
 from core.state import pcr_state
+from orderflow.cas import settlement_estimate
 from orderflow.gex import _latest_gamma
 from gammaleak_runtime.io_logs import append_expiry_row
 
@@ -93,20 +104,33 @@ def update_expiry_anchor(nifty_state: SymbolState, timestamp: float) -> None:
 
     ts_ist = datetime.fromtimestamp(timestamp, IST)
     cur = ts_ist.hour * 60 + ts_ist.minute
-    if cur < _mins(EXPIRY_TRACK_START) or cur >= _mins(EXPIRY_SETTLE_END):
+    cas = cas_active(ts_ist.date())
+    window_end = FNO_CLOSE if cas else EXPIRY_SETTLE_END
+    # When the settlement price gets fixed: the auction print (no later than
+    # matching start) under CAS, the end of the averaging window before it.
+    fix_at = CAS_MATCHING_START if cas else EXPIRY_SETTLE_END
+    if cur < _mins(EXPIRY_TRACK_START) or cur >= _mins(window_end):
         return
 
-    # Settlement accumulator — every tick inside the window counts.
     day_key = ts_ist.date().isoformat()
     if _settle_day != day_key:
         _settle_day = day_key
         _settle_sum = 0.0
         _settle_n = 0
     in_window = cur >= _mins(EXPIRY_SETTLE_START)
-    if in_window:
+    settle_src = ""
+    if in_window and cas:
+        est = settlement_estimate("NIFTY", ts_ist)
+        if est is None:                          # before the freeze: spot is still live
+            nifty_state.expiry_settle_est, settle_src = nifty_state.ltp, "SPOT"
+        else:
+            nifty_state.expiry_settle_est, settle_src = est
+    elif in_window:
+        # Pre-CAS settlement accumulator — every tick inside the window counts.
         _settle_sum += nifty_state.ltp
         _settle_n += 1
         nifty_state.expiry_settle_est = _settle_sum / _settle_n
+        settle_src = "MEAN"
 
     # Snapshot cadence: coarse before the window, fine inside it.
     cadence = EXPIRY_SAMPLE_SECS_SETTLE if in_window else EXPIRY_SAMPLE_SECS_PRE
@@ -114,15 +138,19 @@ def update_expiry_anchor(nifty_state: SymbolState, timestamp: float) -> None:
         return
     _last_sample_ts = timestamp
 
+    # Pin distance is measured from where settlement is heading: on a CAS
+    # day inside the window that is settle_est (implied, then printed
+    # close), not the frozen cash value.
+    ref = nifty_state.expiry_settle_est if (cas and in_window) else nifty_state.ltp
     pin = find_pin_strike(timestamp)
     if pin is not None:
         strike, src, mass = pin
         nifty_state.expiry_pin_strike = strike
-        nifty_state.expiry_pin_dist = nifty_state.ltp - strike
+        nifty_state.expiry_pin_dist = ref - strike
     else:
         strike, src, mass = 0, "", 0.0
 
-    mins_to_close = max(0.0, _mins(EXPIRY_SETTLE_END) - (cur + ts_ist.second / 60.0))
+    mins_to_close = max(0.0, _mins(fix_at) - (cur + ts_ist.second / 60.0))
     try:
         append_expiry_row(
             timestamp=timestamp,
@@ -130,8 +158,9 @@ def update_expiry_anchor(nifty_state: SymbolState, timestamp: float) -> None:
             settle_est=(nifty_state.expiry_settle_est if in_window else None),
             settle_n=_settle_n,
             pin_strike=strike, pin_src=src, pin_mass=mass,
-            pin_dist=(nifty_state.ltp - strike) if strike else None,
+            pin_dist=(ref - strike) if strike else None,
             mins_to_close=mins_to_close,
+            settle_src=settle_src,
         )
     except Exception:
         pass  # disk errors never propagate into the tick path

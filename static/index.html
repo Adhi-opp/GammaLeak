@@ -349,6 +349,42 @@ body {
   border-radius: 3px;
   border-left: 3px solid var(--border);
 }
+/* CLOSING AUCTION (CAS) — freeze / implied close / printed close per index */
+.cas-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: baseline;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.cas-phase { font-weight: 700; padding: 1px 6px; border-radius: 3px; letter-spacing: 0.5px; }
+.cas-status { margin-left: auto; }
+.cas-row {
+  display: grid;
+  grid-template-columns: 104px repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  border-left: 3px solid var(--border);
+}
+.cas-row.cas-hdr {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-left-color: transparent;
+}
+.cas-row .sub { display: block; font-size: 10px; color: var(--text-muted); }
+.cas-exp { font-size: 9px; font-weight: 700; color: var(--yellow); margin-left: 4px; }
+@media (max-width: 640px) {
+  .cas-row { grid-template-columns: 76px repeat(3, minmax(0, 1fr)); }
+  .cas-row .cas-wide { display: none; }
+  .cas-status { margin-left: 0; }
+}
 .po-name { font-weight: 700; }
 .po-prior { color: #aaa; }
 .po-arrow { color: #777; }
@@ -870,6 +906,14 @@ body {
     </div>
   </div>
 
+  <!-- CLOSING AUCTION (CAS): spot freeze, auction-implied close, printed close -->
+  <div class="panel">
+    <div class="panel-title" style="border-color:var(--cyan);">Closing Auction (CAS) &mdash; Spot Freeze &amp; Implied Close</div>
+    <div class="panel-body" id="cas-panel">
+      <div class="dim text-xs">Waiting for engine…</div>
+    </div>
+  </div>
+
   <!-- FOCUS PANEL -->
   <div class="panel">
     <div class="panel-title" style="border-color:var(--magenta);">Focus</div>
@@ -1055,21 +1099,6 @@ function renderMacro(data) {
     </div>`);
   }
 
-  // USDINR compact chip (card removed from main grid; surface here)
-  const usd = m['USDINR'];
-  if (usd) {
-    const usdVal = usd.value != null ? fmtNum(usd.value, 4) : '—';
-    const chg = usd.change_pct;
-    const usdColor = chg == null ? 'neutral' : chg > 0 ? 'down' : chg < 0 ? 'up' : 'neutral';
-    const chgText = chg == null ? (usd.value == null ? 'awaiting' : 'flat')
-                                : `${chg > 0 ? '+' : ''}${chg.toFixed(2)}%`;
-    chips.push(`<div class="macro-chip">
-      <span class="label">USDINR</span>
-      <span class="value ${usdColor}">${usdVal}</span>
-      <span class="change ${usdColor}">${chgText}</span>
-    </div>`);
-  }
-
   el.innerHTML = chips.join('');
 
   // FII/DII
@@ -1187,6 +1216,81 @@ function renderPreOpen(data) {
       <span class="po-bucket">${r.gap_bucket}</span>
     </div>`;
   }).join('');
+}
+
+const CAS_PHASE_TEXT = {
+  REFERENCE: 'Reference window — the auction reference price (15:00–15:15 VWAP) is forming',
+  TRANSITION: 'Transition — spot indices frozen at the 15:15 print',
+  ORDER_ENTRY: 'Order entry — spot frozen, F&O still trading',
+  LIMIT_ONLY: 'Limit orders only — spot frozen',
+  RANDOM_CLOSE: 'Random close — the auction close prints 15:28–15:30',
+  MATCHING: 'Matching — closing prices being confirmed',
+  POST_CAS_FNO: 'Post-auction — F&O trades to 15:40 with settlement already fixed',
+};
+
+function casGapHTML(pts, bps, refP90) {
+  if (pts == null) return '<span class="dim">—</span>';
+  const big = bps != null && refP90 != null && Math.abs(bps) >= refP90;
+  const cls = big ? 'warn' : (pts > 0 ? 'up' : pts < 0 ? 'down' : 'neutral');
+  const bpsTxt = bps != null ? ` <span class="sub">${bps > 0 ? '+' : ''}${bps.toFixed(1)} bps${big ? ' · ≥ p90' : ''}</span>` : '';
+  return `<span class="${cls}"><strong>${pts > 0 ? '+' : ''}${pts.toFixed(2)}</strong>${bpsTxt}</span>`;
+}
+
+function renderCAS(data) {
+  const el = document.getElementById('cas-panel');
+  if (!el) return;
+  const cas = data.cas;
+  if (!cas) {
+    el.innerHTML = '<div class="dim text-xs">CAS tracker not reporting.</div>';
+    return;
+  }
+  const st = cas.market_status || {};
+  const statusTxt = ['NSE_EQ', 'NSE_INDEX', 'NSE_FO', 'BSE_EQ']
+    .filter(k => st[k]).map(k => `${k} <strong>${st[k]}</strong>`).join(' · ');
+  const phaseHTML = cas.phase
+    ? `<span class="cas-phase bg-accent">${cas.phase.replace(/_/g, ' ')}</span><span>${CAS_PHASE_TEXT[cas.phase] || ''}</span>`
+    : '<span>Outside the auction window</span>';
+  const cs = cas.chain_spot || {};
+  const anchorTxt = {
+    FUT: 'futures-implied (cash frozen, options trade off the futures)',
+    FROZEN: 'frozen cash value (no futures basis yet)',
+  }[cs.src];
+  const anchor = anchorTxt && cs.value != null
+    ? `<div class="cas-head">Option chain read against <strong>${fmtNum(cs.value, 2)}</strong> — ${anchorTxt}</div>`
+    : '';
+  const head = `<div class="cas-head">${phaseHTML}${statusTxt ? `<span class="cas-status">${statusTxt}</span>` : ''}</div>${anchor}`;
+  if (!cas.active) {
+    el.innerHTML = head + '<div class="dim text-xs">Closing auction not in effect for this session date.</div>';
+    return;
+  }
+  const rows = cas.rows || [];
+  if (rows.length === 0) {
+    el.innerHTML = head + '<div class="dim text-xs">Spot indices freeze at 15:15; the auction close prints 15:28–15:30 and settles expiring index contracts. F&amp;O trades to 15:40. Tracking starts at 15:00.</div>';
+    return;
+  }
+  const hdr = `<div class="cas-row cas-hdr">
+    <span>Index</span><span>15:15 freeze</span><span>Implied close</span>
+    <span>Implied gap</span><span class="cas-wide">Official close</span><span class="cas-wide">Realised gap</span>
+  </div>`;
+  const body = rows.map(r => {
+    const implied = r.implied_src === 'SYNTH' ? r.synth_implied_close : r.fut_implied_close;
+    const impliedTxt = implied != null
+      ? `${fmtNum(implied, 2)} <span class="sub">${r.implied_src === 'SYNTH' ? 'options parity' : 'futures − basis'}</span>`
+      : '<span class="dim">—</span>';
+    const typical = r.ref_mean_abs_pts != null ? `<span class="sub">typ |gap| ${fmtNum(r.ref_mean_abs_pts, 0)} pts (n=${r.ref_n})</span>` : '';
+    const errTxt = r.forecast_err != null ? `<span class="sub">vs implied: ${r.forecast_err > 0 ? '+' : ''}${r.forecast_err.toFixed(2)}</span>` : '';
+    const frozenTxt = r.frozen != null ? fmtNum(r.frozen, 2)
+      : (r.last_cts != null ? `${fmtNum(r.last_cts, 2)} <span class="sub">live</span>` : '<span class="dim">—</span>');
+    return `<div class="cas-row">
+      <span class="po-name">${r.index}${r.expiry ? '<span class="cas-exp">EXPIRY</span>' : ''}</span>
+      <span>${frozenTxt}</span>
+      <span>${impliedTxt}</span>
+      <span>${casGapHTML(r.implied_gap, r.implied_gap_bps, r.ref_p90_abs_bps)}${typical}</span>
+      <span class="cas-wide">${r.official_close != null ? `<strong>${fmtNum(r.official_close, 2)}</strong>` : '<span class="dim">pending</span>'}</span>
+      <span class="cas-wide">${casGapHTML(r.realized_gap, r.realized_gap_bps, r.ref_p90_abs_bps)}${errTxt}</span>
+    </div>`;
+  }).join('');
+  el.innerHTML = head + hdr + body;
 }
 
 // Per-card expand state for the math dropdown. Survives the 4Hz re-renders
@@ -1957,6 +2061,7 @@ function render(data) {
   document.getElementById('session-badge').textContent = data.session || '-';
   renderMacro(data);
   renderPreOpen(data);
+  renderCAS(data);
   renderFocus(data);
   renderInstruments(data);
   renderDrivers(data);

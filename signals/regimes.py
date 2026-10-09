@@ -12,16 +12,13 @@ Returns the regime label (one of the constants from core.config) or empty
 string if no decisive read. The engine's `update_signal_engine` consumes the
 return value to tag the dashboard and gate fade signals.
 
-Side effect: also runs `classify_oi_flow` + `record_oi_flow_sample` once per
-NIFTY tick — the regime classifier is the natural place to fan these out
-since it already runs on every spot tick.
+The ATM OI RoC inputs (and the OI-flow / GEX fan-out that used to run from
+here) are computed by orderflow/chain.py, which runs outside the signal
+engine — so blackouts and the CAS freeze no longer pause the chain read.
 """
 from __future__ import annotations
 
-from collections import deque
-
 from core.config import (
-    OI_ROC_WINDOW_SECS,
     OI_ROC_CAPITULATION_PCT,
     OI_ROC_PIN_RANGE,
     REGIME_GAMMA_SQUEEZE,
@@ -29,55 +26,22 @@ from core.config import (
     REGIME_PIN,
 )
 from core.models import SymbolState
-from core.state import symbol_states, pcr_state
-from orderflow.gex import update_gex
-from orderflow.oi_flow import classify_oi_flow, record_oi_flow_sample
+from core.state import symbol_states
 
 
-def compute_oi_roc(history: deque, current_ts: float) -> float:
-    """Compute % change in OI over the rolling OI_ROC_WINDOW_SECS window."""
-    if not history or len(history) < 2:
-        return 0.0
-    cutoff = current_ts - OI_ROC_WINDOW_SECS
-    # Find oldest entry within window
-    oldest_oi = None
-    for ts, oi in history:
-        if ts >= cutoff:
-            oldest_oi = oi
-            break
-    if oldest_oi is None or oldest_oi == 0:
-        return 0.0
-    newest_oi = history[-1][1]
-    return ((newest_oi - oldest_oi) / oldest_oi) * 100
-
-
-def classify_dynamic_regime(state: SymbolState, timestamp: float) -> str:
+def classify_dynamic_regime(state: SymbolState) -> str:
     """V4.0 master regime classifier. Determines which of the 3 adaptive regimes
-    the market is currently in, based on ATR, OI RoC, and straddle box.
+    the market is currently in, based on ATR and the ATM OI RoC.
     Priority: GAMMA SQUEEZE > EXPANSION > THE PIN"""
 
     nifty_state = symbol_states.get("NSE_INDEX|Nifty 50")
     if nifty_state is None or nifty_state.ltp <= 0:
         return ""
 
-    atm = int(round(nifty_state.ltp / 50.0) * 50)
+    ce_roc = nifty_state.oi_roc_ce_atm
+    pe_roc = nifty_state.oi_roc_pe_atm
 
     # 1. GAMMA SQUEEZE CHECK (highest priority) — OI capitulation
-    ce_roc = compute_oi_roc(pcr_state.oi_history_ce.get(atm, deque()), timestamp)
-    pe_roc = compute_oi_roc(pcr_state.oi_history_pe.get(atm, deque()), timestamp)
-
-    # Store on Nifty state for dashboard visibility
-    nifty_state.oi_roc_ce_atm = ce_roc
-    nifty_state.oi_roc_pe_atm = pe_roc
-
-    # V5.1: OI Delta flow classification (runs on every regime tick)
-    classify_oi_flow(nifty_state)
-    record_oi_flow_sample(nifty_state, timestamp)
-
-    # P2 shadow: net dealer gamma refresh + per-strike snapshot (60s throttle
-    # inside — same fan-out point as the OI flow updaters above)
-    update_gex(nifty_state, timestamp)
-
     if ce_roc <= OI_ROC_CAPITULATION_PCT or pe_roc <= OI_ROC_CAPITULATION_PCT:
         return REGIME_GAMMA_SQUEEZE
 

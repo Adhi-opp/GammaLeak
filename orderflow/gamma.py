@@ -8,8 +8,9 @@ Fires when three independent micro-structure conditions stack on the ATM strike:
 
 When all three trip, the OI-unwind side (CE vs PE) decides whether the flush is
 upward (+1 — call writers buying back) or downward (-1 — put writers covering).
-Consumed by the V3 sig_state override at the engine's `classify_dynamic_regime`
-call site, which forces SIGNAL_GAMMA_FLUSH_LONG / SIGNAL_GAMMA_FLUSH_SHORT.
+Evaluated on every chain refresh (orderflow/chain.py); the flag is consumed
+by the V3 sig_state override in update_signal_engine, which forces
+SIGNAL_GAMMA_FLUSH_LONG / SIGNAL_GAMMA_FLUSH_SHORT.
 """
 from __future__ import annotations
 
@@ -19,17 +20,17 @@ from core.config import (
     GAMMA_FLUSH_GAMMA_EXPAND_PCT,
     GAMMA_FLUSH_SELL_DOMINANCE,
 )
-from core.state import symbol_states, pcr_state
+from core.state import pcr_state
 
 
-def check_gamma_flush(timestamp: float) -> tuple[bool, int]:
-    """Check if gamma flush conditions are met across ATM strikes.
+def check_gamma_flush(timestamp: float, underlying: float) -> tuple[bool, int]:
+    """Check if gamma flush conditions are met across ATM strikes, with ATM
+    taken from the chain underlying (orderflow.chain.chain_spot).
     Returns (is_active, side) where side is -1 (downward flush) or +1 (upward flush)."""
-    nifty_state = symbol_states.get("NSE_INDEX|Nifty 50")
-    if nifty_state is None or nifty_state.ltp <= 0:
+    if underlying <= 0:
         return False, 0
 
-    atm = int(round(nifty_state.ltp / 50.0) * 50)
+    atm = int(round(underlying / 50.0) * 50)
     cutoff = timestamp - GAMMA_FLUSH_WINDOW_SECS
 
     # 1. Check IV spike at ATM strike

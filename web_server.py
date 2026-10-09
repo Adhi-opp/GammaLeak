@@ -17,7 +17,6 @@ import asyncio
 import json
 import logging
 import os
-import threading
 from pathlib import Path
 
 import uvicorn
@@ -162,11 +161,6 @@ async def run_engine_headless(mock: bool = False) -> None:
     # mutates the canonical flag the serializers actually read.
     serializers._engine_ready = True
     log.info("Engine ready — symbol_states initialized with %d instruments", len(engine.symbol_states))
-
-    # Macro worker thread
-    macro_worker = threading.Thread(target=engine.fetch_macro_worker, daemon=True)
-    macro_worker.start()
-    log.info("Macro worker thread started")
 
     # FII/DII pre-market fetch
     if engine.FII_BOOT_ENABLED and engine._FII_AVAILABLE:

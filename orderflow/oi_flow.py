@@ -1,6 +1,6 @@
 """OI Delta flow classification + timeline recorder.
 
-`classify_oi_flow` runs every tick that touches the NIFTY spot — it diffs the
+`classify_oi_flow` runs on every chain refresh (orderflow/chain.py) — it diffs the
 current ATM±2 strikes' CE/PE OI against the prior PCR snapshot, cross-references
 with price direction, and labels the resulting quadrant (NEW LONGS / NEW SHORTS /
 SHORT COVER / LONG EXIT / NEUTRAL) plus the CE-vs-PE divergence flavor.
@@ -87,15 +87,18 @@ def record_oi_flow_sample(nifty_state: SymbolState, timestamp: float) -> None:
         pass
 
 
-def classify_oi_flow(nifty_state: SymbolState) -> None:
+def classify_oi_flow(nifty_state: SymbolState, underlying: float) -> None:
     """V5.1: 4-quadrant OI Delta classification + CE/PE divergence.
-    Uses the 5-minute OI snapshot delta cross-referenced with price direction."""
+    Uses the 5-minute OI snapshot delta cross-referenced with price direction.
+    `underlying` is the chain's reference level (orderflow.chain.chain_spot):
+    the live spot, or the futures-implied spot while the cash index is
+    frozen for the closing auction."""
     if pcr_state.oi_snapshot_ts is None or pcr_state.ltp_at_oi_snapshot <= 0:
         return
-    if nifty_state.ltp <= 0:
+    if underlying <= 0:
         return
 
-    atm = int(round(nifty_state.ltp / 50.0) * 50)
+    atm = int(round(underlying / 50.0) * 50)
     window = [atm - 100, atm - 50, atm, atm + 50, atm + 100]
 
     # --- OI deltas across ATM window ---
@@ -112,7 +115,7 @@ def classify_oi_flow(nifty_state: SymbolState) -> None:
     nifty_state.oi_flow_pe_delta = int(pe_delta)
 
     # --- Price direction since last OI snapshot ---
-    price_delta = nifty_state.ltp - pcr_state.ltp_at_oi_snapshot
+    price_delta = underlying - pcr_state.ltp_at_oi_snapshot
 
     # --- 4-Quadrant Classification ---
     if abs(total_oi_delta) < OI_FLOW_MIN_DELTA:

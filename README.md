@@ -15,7 +15,7 @@
 
 | Aspect | Detail |
 |---|---|
-| **Domain** | Live tick stream from Upstox WebSocket v3 — NIFTY 50, BANKNIFTY, NIFTY/BN front-month futures, USDINR FUT, CRUDEOIL FUT, India VIX, plus equity drivers (RELIANCE, HDFCBANK, SBIN, ICICIBANK) and a dynamic NIFTY option-chain window |
+| **Domain** | Live tick stream from Upstox WebSocket v3 — NIFTY 50, BANKNIFTY, NIFTY/BN front-month futures, CRUDEOIL FUT, India VIX, plus equity drivers (RELIANCE, HDFCBANK, SBIN, ICICIBANK) and a dynamic NIFTY option-chain window |
 | **Scale** | Measured across 10 sessions (2026-05-19 … 2026-06-04): **292K–365K logged ticks per session** (mean 323K) for 11 instruments; aggregate tick rate **avg ~16/s, peak 132/s** (May 27, 12:55 IST — verified from per-second bucket counts across all symbol CSVs) |
 | **Codebase** | ~10,000 lines Python: `GammaLeak.py` (4,032) + 6 packages (`core`, `ui`, `orderflow`, `signals`, `analytics`, `gammaleak_runtime`, 3,542 total) + FastAPI broadcaster (256) + utility scripts (1,429) + `calibrate.py` nightly grader (~600) + `backtest_api.py` API backtester (~300); ~2,390 lines vanilla-JS dashboard (`static/index.html` 1,902 + `static/simulation.html` 488) |
 | **Pipeline** | gzip → protobuf decode → per-symbol `SymbolState` → 6-stage math + Lee-Ready aggressor → CVD + 5 divergence patterns → vol surface (ATM IV / 25Δ skew / IV percentile) → lift-weighted conviction score → English-verdict composer → 4 Hz WebSocket fan-out + per-symbol CSV; nightly `calibrate.py` re-derives regime gate rules and conviction weights from MFE-graded outcomes |
@@ -77,6 +77,7 @@ flowchart LR
   - [7. OAuth Token Exchange](#7-oauth-token-exchange)
 - [Data Pipeline](#data-pipeline)
 - [Instrument Master & Self-Healing Resolver](#instrument-master--self-healing-resolver)
+- [Closing Auction Session (CAS)](#closing-auction-session-cas)
 - [Tech Stack](#tech-stack)
 - [Project Structure](#project-structure)
 - [Setup & Installation](#setup--installation)
@@ -91,7 +92,7 @@ flowchart LR
 
 ## Problem Statement
 
-Discretionary F&O traders monitor 6+ instruments (NIFTY, BANKNIFTY, USDINR, Crude, RELIANCE, HDFCBANK) + options OI + global cues simultaneously. The three pathologies this tool addresses:
+Discretionary F&O traders monitor 6+ instruments (NIFTY, BANKNIFTY, Crude, RELIANCE, HDFCBANK) + options OI + global cues simultaneously. The three pathologies this tool addresses:
 
 1. **Attention overload** — collapse everything into one HUD/dashboard that surfaces the *statistically anomalous* instrument in real time.
 2. **Late-tape problem** — after ~10:30 AM the session VWAP becomes "heavy" and micro-flushes stop registering in the session Z-score. Signals arrive *after* the move. The V5.2 Micro-Structural Layer adds a rolling 15-min anchor + Z-velocity + tick-rate + cross-asset acceleration amber so a fresh anomaly can be flagged before the session Z catches up. The lead-time isn't benchmarked across events (would need amber/CONFIRM timestamp pairs that the current events.csv schema doesn't capture); the *design intent* is that a 900 s rolling window can't be diluted the way a cumulative session anchor can.
@@ -200,7 +201,6 @@ python web_server.py                  # Headless engine + browser dashboard
 | RELIANCE | `NSE_EQ|RELIANCE` | Equity spot driver |
 | HDFC Bank | `NSE_EQ|HDFCBANK` | Equity spot driver |
 | SBIN, ICICIBANK | `NSE_EQ|...` | Driver panel |
-| USDINR FUT | `NSE_FO|USDINR{expiry}FUT` | Currency future |
 | Crude Oil FUT | `MCX_FO|CRUDEOIL{expiry}FUT` | Commodity future |
 | NIFTY option chain — ATM ± dynamic window | `NSE_FO|NIFTY{expiry}{strike}{CE/PE}` | Option strikes |
 
@@ -370,6 +370,8 @@ get_active_expiry_key(symbol, "FUT")
       MCX liquidity rolls to next month on expiry day)
     - Alive filter: expiry >= today for OPT (weekly expiry options stay valid on expiry day)
     - Picks the earliest alive expiry -> returns exchange-prefixed instrument key
+    - Multi-venue futures (FUT_VENUE_PREFERENCE): CRUDEOIL -> MCX; venue outranks
+      expiry, names compared space-insensitively (MCX lists "CRUDE OIL")
 
 resolve_dynamic_instruments()
     - Loud-fails with RuntimeError listing missing contracts if any symbol can't be resolved
@@ -380,6 +382,35 @@ Validated paths:
 - Live fetch: ~165 k rows, ~3.4 MB cache written, CRUDEOIL → `MCX_FO|{id}` (front month)
 - Network dead + cache present: recovers from cache
 - Network dead + cache deleted: raises `RuntimeError` loudly
+
+---
+
+## Closing Auction Session (CAS)
+
+Since **2026-08-03** (SEBI circular of 2026-01-16) NSE and BSE close F&O-eligible stocks through a call auction: continuous trading ends **15:15**, order entry runs 15:20 → a random close between 15:28 and 15:30, prices are confirmed by 15:35, and **index/stock F&O trade until 15:40**. Expiring index options and futures settle on the CAS-derived index close, not the old last-30-minute average.
+
+Measured on 42 sessions (2026-08-03 → 10-01, `research/study_cas_closing_auction.py`, Upstox 1-min candles):
+
+| | NIFTY | BANKNIFTY | SENSEX |
+| --- | --- | --- | --- |
+| Spot flat from 15:15 until the close prints | 42/42 | 42/42 | 42/42 |
+| Close prints in the | 15:28 / 15:29 bar | same | same |
+| Mean \|close − 15:15 print\| | 38 pts (15.8 bps) | 105 pts (18.4 bps) | 102 pts (13.4 bps) |
+| Largest | +201 pts (Aug 3) | +628 pts (Aug 31) | −401 pts (Sep 3, expiry) |
+| Expiry vs non-expiry mean \|gap\| | 20.7 vs 14.5 bps | n=2 expiries | 26.2 vs 10.4 bps |
+
+The feed keeps delivering the frozen value at heartbeat cadence, so before this change rolling σ collapsed and |Z| rode to the cap; replayed CAS days produced ALERT and TREND_KILL rows on the close print, tagged `tod_phase=CLOSE` and gradeable by the calibrator.
+
+How the engine handles it (all boundaries live in `core/config.py`, since SEBI's 2026-09-12 consultation may move them):
+
+- **Session clock** — `continuous_session_end()` per instrument class: spot indices and F&O stocks stop at 15:15, index futures at 15:40, everything at 15:30 before Aug 3. Past it, ticks are logged but σ/VWAP/Z/ATR/CVD hold their last continuous values and the signal path blacks out (`CAS FREEZE`); an open signal is closed and logged. `session_phase()` adds a `CAS` phase (15:15–15:40) on CAS-era dates.
+- **Cash vs derivatives** — the NIFTY option-chain analytics (ATM OI rate-of-change, OI flow, dealer GEX, straddle box, vol surface, gamma flush, PCR window, OI walls, ATM subscription radar) live in `orderflow/chain.py`, outside the signal engine. They are read against `chain_spot`: the live spot in continuous trading, and from 15:15 to 15:40 the futures-implied spot (`NIFTY_FUT` − the basis fixed at 15:15), driven by futures ticks. The options price off the futures, not the frozen cash. On 12 sessions (Sep 15 – Oct 1), in all 5 cases where futures moved 10+ pts inside the auction, the option parity forward moved the same way. Blackouts (events, expiry pin, CAS freeze) silence signals but no longer pause the chain. Spot cards mirror their futures' verdict, now SENSEX too.
+- **Grader** — `calibrate.py` truncates forward windows at the same boundary; fires after it are ungradable. The CLOSE phase is reported per era (`CLOSE` pre-CAS vs `CLOSE-CAS`) — the two must not be pooled.
+- **CAS tracker** (`orderflow/cas.py`, shadow) — per index: the 15:15 freeze, the futures-implied close (futures − basis fixed at the freeze), for NIFTY the put-call-parity implied close (median K + C − P over the nearest strikes), the printed close, and the forecast error. Logged to `logs/<date>_cas.csv`; the dashboard shows it in the *Closing Auction* panel.
+- **Exchange phase clock** — the feed's `market_info` frames (`NORMAL_OPEN`, `CLOSING_START`, `CLOSING_END`, …) were previously discarded; transitions now land in `logs/<date>_market_status.csv` so the timetable can be checked against the exchange.
+- **Expiry tracker** — on CAS days `settle_est` follows the implied close and then the printed close (`settle_src` column); the P4 averaging mechanism no longer exists, so pre- and post-CAS expiries are separate samples.
+
+Nothing CAS-derived gates a live signal. The `_cas.csv` log exists so hypotheses about the auction can be tested on forward data before anything is wired in.
 
 ---
 
@@ -522,11 +553,11 @@ python oauth_token_exchange.py       # fetches first access token
 
 | Time | Command | Purpose |
 |------|---------|---------|
-| Before 9:15 AM IST | `python oauth_token_exchange.py` | Refresh 24-h JWT |
+| When the token expires | `python oauth_token_exchange.py` | Re-issue the Upstox token (the extended token in use is valid ~1 year) |
 | 9:00 AM | `python fii_dii_scraper.py` | Pre-market FII/DII snapshot |
-| 9:15 AM – 3:30 PM | `python web_server.py` **or** `python GammaLeak.py` | Live engine (browser or terminal) |
-| After 3:30 PM | `python GammaLeak.py --review` | Post-market signal accuracy audit |
-| 16:00 PM (auto on server) | `python calibrate.py` | Nightly grader — re-derives gate rules + conviction weights into `core/calibration.py` |
+| 9:15 AM – 3:40 PM | `python web_server.py` **or** `python GammaLeak.py` | Live engine (browser or terminal); spot freezes 3:15 PM for the closing auction, F&O trades to 3:40 PM |
+| After 3:45 PM | `python GammaLeak.py --review` | Post-market signal accuracy audit |
+| Periodically (manual) | `python calibrate.py` | Grader — re-derives gate rules + conviction weights into `data/learned_gate.json` once enough sessions accumulate (the daily timer is deliberately not enabled) |
 | Anytime | `python backtest_api.py` | Validate pipeline against fresh Upstox API candles |
 | Anytime | `python fetch_historical.py --symbol NIFTY ...` | Ad-hoc data pull |
 
@@ -596,7 +627,7 @@ All numbers below are reproducible from `logs/` (10 sessions, 2026-05-19 … 202
 
 ### Signal quality (MFE-graded backtest)
 
-A signal is graded **OK** if max favourable excursion in the 10-minute window after CONFIRM clears a per-symbol noise floor (NIFTY/NIFTY\_FUT 15 pts, BANKNIFTY/BN\_FUT 40 pts, CRUDEOIL 15 pts, stocks 3–5 pts, USDINR 0.05 pts; ATR-scaled with `MFE_ATR_K = 0.5`).
+A signal is graded **OK** if max favourable excursion in the 10-minute window after CONFIRM clears a per-symbol noise floor (NIFTY/NIFTY\_FUT 15 pts, BANKNIFTY/BN\_FUT 40 pts, CRUDEOIL 15 pts, stocks 3–5 pts; ATR-scaled with `MFE_ATR_K = 0.5`).
 
 **API-validated backtest (independent of internal logs):** `backtest_api.py` fetched fresh 1-min Upstox historical candles for May 4–29 2026 (19 sessions) and replayed the full signal pipeline:
 

@@ -57,29 +57,31 @@ def classify_skew_state(skew: float) -> str:
     return "NEUTRAL"
 
 
-def update_nifty_vol_state(state, timestamp: float) -> None:
+def update_nifty_vol_state(state, timestamp: float, underlying: float) -> None:
     """Compute and stamp vol surface metrics onto the NIFTY SymbolState.
 
     Throttled to VOL_SAMPLE_INTERVAL_SECS by the caller — this function does
-    no throttling itself so it can be tested cleanly.
+    no throttling itself so it can be tested cleanly. ATM and the skew wings
+    are picked around `underlying`, the chain's reference level (live spot,
+    or the futures-implied spot while the cash index is frozen for CAS).
 
     Sets on state: atm_iv, skew_25d, iv_percentile, vol_regime, skew_state.
     All fields default to safe neutral values when data is absent.
     """
-    if state.ltp <= 0.0:
+    if underlying <= 0.0:
         return
 
     now = timestamp
     ce_hist = pcr_state.iv_history_ce
     pe_hist = pcr_state.iv_history_pe
 
-    atm_iv = get_atm_iv(state.ltp, now, ce_hist, pe_hist)
+    atm_iv = get_atm_iv(underlying, now, ce_hist, pe_hist)
     if atm_iv is None:
         return  # no live IV data yet — keep previous values
 
     state.atm_iv = atm_iv
 
-    skew = get_skew(state.ltp, now, ce_hist, pe_hist)
+    skew = get_skew(underlying, now, ce_hist, pe_hist)
     if skew is not None:
         state.skew_25d = skew
         state.skew_state = classify_skew_state(skew)
