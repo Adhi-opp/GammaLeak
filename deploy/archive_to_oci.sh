@@ -64,9 +64,9 @@ mkdir -p "$STATE_DIR"
 REMOTE_BASE="${REMOTE}:${BUCKET}/${PREFIX}"
 TODAY="$(date '+%F')"   # box is on Asia/Kolkata (DEPLOY.md Step 2), so this is IST
 # Minutes-past-midnight after which today's session is considered closed and
-# safe to archive (engine stops 15:35; default cutoff 15:40). Guards against a
-# manual mid-session run shipping a partial day.
-SESSION_CLOSE_HHMM="${GAMMALEAK_SESSION_CLOSE_HHMM:-1540}"
+# safe to archive (F&O closes 15:40 under CAS, engine stops 15:45; default
+# cutoff 15:50). Guards against a manual mid-session run shipping a partial day.
+SESSION_CLOSE_HHMM="${GAMMALEAK_SESSION_CLOSE_HHMM:-1550}"
 
 today_session_closed() {
     [ "$(date '+%H%M')" -ge "$SESSION_CLOSE_HHMM" ]
@@ -99,6 +99,9 @@ archive_date() {
     # P4 expiry settlement-anchor track — expiry file exists only on Tuesdays)
     [ -f "${LOG_DIR}/${d}_gex.csv" ]      && members+=( "${d}_gex.csv" )
     [ -f "${LOG_DIR}/${d}_expiry.csv" ]   && members+=( "${d}_expiry.csv" )
+    # 2026-10: closing-auction tracker + exchange segment-status transitions
+    [ -f "${LOG_DIR}/${d}_cas.csv" ]           && members+=( "${d}_cas.csv" )
+    [ -f "${LOG_DIR}/${d}_market_status.csv" ] && members+=( "${d}_market_status.csv" )
     # Point-in-time copy of the cumulative IV history travels in the tarball too.
     [ -f "${LOG_DIR}/iv_session_history.csv" ] && members+=( "iv_session_history.csv" )
 

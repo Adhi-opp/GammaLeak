@@ -1,10 +1,11 @@
 [Unit]
-Description=Stop GammaLeak engine at 15:35 IST on weekdays
+Description=Stop GammaLeak engine at 15:45 IST on weekdays
 
 [Timer]
-# Market closes 15:30 IST; +5min lets the disk-writer flush and the OI Flow
-# state mirror persist the final samples before shutdown.
-OnCalendar=Mon..Fri 15:35:00 Asia/Kolkata
+# F&O trades to 15:40 IST since the closing auction went live (2026-08-03;
+# cash/indices settle via the 15:15-15:35 auction). +5min lets the disk-writer
+# flush and the OI Flow state mirror persist the final samples before shutdown.
+OnCalendar=Mon..Fri 15:45:00 Asia/Kolkata
 Persistent=true
 Unit=gammaleak-stop.service
 

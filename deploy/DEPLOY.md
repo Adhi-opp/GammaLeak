@@ -5,7 +5,7 @@ Cloud ARM Ampere "Always Free" instance, auto-started by systemd timers,
 reachable from your own devices via Tailscale's private mesh network.
 No public IP exposure, no paid domain required.
 
-**Operational profile**: Engine starts 09:13 IST, stops 15:35 IST, Mon–Fri.
+**Operational profile**: Engine starts 09:13 IST, stops 15:45 IST (F&O closes 15:40 under the closing auction), Mon–Fri.
 Zero daily manual touch as long as the Upstox token remains valid (in
 practice: generate once, lasts until Upstox invalidates).
 
@@ -103,7 +103,7 @@ sudo systemctl enable --now gammaleak-start.timer gammaleak-stop.timer
 systemctl list-timers gammaleak-*
 ```
 
-Expected output: two timers (start 09:13 / stop 15:35) on the next weekday.
+Expected output: two timers (start 09:13 / stop 15:45) on the next weekday.
 The optional calibrate timer re-derives the regime gate from graded outcomes
 (writes the `data/learned_gate.json` data artifact); the next 09:13 boot picks
 it up automatically via `core/config.py`'s merge — no restart needed. Leave the
@@ -299,17 +299,17 @@ rclone ls oci:gammaleak-data/gammaleak/daily | tail
 The script never deletes local data, writes a `logs/.archive_state/<date>.done`
 marker only on a verified upload, and re-tries any un-marked day on the next run.
 
-### OS-6 — Install the timer (15:45 IST, weekdays)
+### OS-6 — Install the timer (15:55 IST, weekdays)
 
 ```bash
 sudo cp /opt/gammaleak/deploy/gammaleak-archive.service /etc/systemd/system/
 sudo cp /opt/gammaleak/deploy/gammaleak-archive.timer   /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now gammaleak-archive.timer
-systemctl list-timers gammaleak-archive.timer   # confirm next-fire = next weekday 15:45 IST
+systemctl list-timers gammaleak-archive.timer   # confirm next-fire = next weekday 15:55 IST
 ```
 
-It fires 10 min after the 15:35 stop. If the box was down at fire time,
+It fires 10 min after the 15:45 stop. If the box was down at fire time,
 `Persistent=true` + the script's built-in catch-up backfill the missed days on
 the next boot — no session is ever silently lost.
 
@@ -337,8 +337,8 @@ Once a day is safely in Object Storage you can shrink the local volume:
 
 ## Daily ops
 
-**Nothing.** The engine starts 09:13 IST every weekday, stops 15:35, the day's
-data is archived to Object Storage at 15:45, and the dashboard is always at
+**Nothing.** The engine starts 09:13 IST every weekday, stops 15:45, the day's
+data is archived to Object Storage at 15:55, and the dashboard is always at
 `http://gammaleak:8080` from any of your Tailscale-connected devices.
 
 ## Weekly / monthly ops
