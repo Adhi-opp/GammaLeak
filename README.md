@@ -423,6 +423,7 @@ Nothing CAS-derived gates a live signal. The `_cas.csv` log exists so hypotheses
 | Historical | Upstox REST v2 | OHLCV (1min – month) |
 | Global indices | Upstox `/v3/market-quote/ltp` | GIFT NIFTY, US, Europe, Asia |
 | Participant OI | NSE F&O archives | FII/DII positioning |
+| Research data | NSE MCP servers (`.mcp.json`) | Daily history + delayed live quotes for research only; never read by the engine |
 | Serialization | Protocol Buffers | WebSocket decode |
 | Async I/O | aiohttp + asyncio + websockets | Concurrent REST + WS |
 | Web Dashboard | FastAPI + WebSocket + vanilla JS | Browser HUD @ 4 Hz |
